@@ -24,7 +24,9 @@ func exeDir() string {
 	if err != nil {
 		log.Fatal(err)
 	}
-	return strings.ReplaceAll(exe, "\\", "/")[:strings.LastIndex(strings.ReplaceAll(exe, "\\", "/"), "/")]
+	// Use backslashes for Windows
+	dir := strings.ReplaceAll(exe, "/", "\\")
+	return dir[:strings.LastIndex(dir, "\\")]
 }
 
 //
@@ -64,7 +66,6 @@ func nodeToMap(n xmlNode) map[string]interface{} {
 	}
 
 	result := make(map[string]interface{})
-
 	for _, child := range n.Nodes {
 		childMap := nodeToMap(child)
 		key := child.XMLName.Local
@@ -92,7 +93,6 @@ func parseXMLToMap(xmlBytes []byte) (map[string]interface{}, error) {
 	if err := xml.Unmarshal(xmlBytes, &root); err != nil {
 		return nil, err
 	}
-
 	return map[string]interface{}{
 		root.XMLName.Local: nodeToMap(root)[root.XMLName.Local],
 	}, nil
@@ -117,7 +117,6 @@ func loadStyle(path string) (*ReportStyle, error) {
 
 func pageSize(style *ReportStyle) (float64, float64) {
 	const mmToPt = 2.83465
-
 	var w, h float64
 	switch strings.ToUpper(style.PDF.PageSize) {
 	case "LETTER":
@@ -128,7 +127,6 @@ func pageSize(style *ReportStyle) (float64, float64) {
 	default:
 		w, h = 595.28, 842
 	}
-
 	if strings.ToUpper(style.PDF.Orientation) == "L" {
 		return h, w
 	}
@@ -141,11 +139,9 @@ func pageSize(style *ReportStyle) (float64, float64) {
 
 func wrap(pdf *gopdf.GoPdf, text, font string, size, maxW float64) []string {
 	pdf.SetFont(font, "", size)
-
 	words := strings.Fields(text)
 	var lines []string
 	line := ""
-
 	for _, w := range words {
 		test := strings.TrimSpace(line + " " + w)
 		width, _ := pdf.MeasureTextWidth(test)
@@ -179,14 +175,12 @@ func parseStyled(line string, rules map[string]string) []part {
 	font := rules["normal"]
 	var out []part
 	buf := ""
-
 	flush := func() {
 		if buf != "" {
 			out = append(out, part{buf, font})
 			buf = ""
 		}
 	}
-
 	for len(line) > 0 {
 		switch {
 		case strings.HasPrefix(line, "<bold>"):
@@ -219,13 +213,10 @@ func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[s
 	if fontSize == 0 {
 		fontSize = 12
 	}
-
 	margin := 50.0
 	y := margin
-
 	for _, line := range strings.Split(content, "\n") {
 		parts := parseStyled(line, rules)
-
 		for _, p := range parts {
 			for _, l := range wrap(pdf, p.Text, p.Font, fontSize, pageW-2*margin) {
 				if y > pageH-margin {
@@ -247,12 +238,11 @@ func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[s
 
 func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 	w, h := pageSize(style)
-
 	pdf := gopdf.GoPdf{}
 	pdf.Start(gopdf.Config{PageSize: gopdf.Rect{W: w, H: h}})
 	pdf.AddPage()
 
-	fontDir := reportFolder + "/fonts"
+	fontDir := reportFolder + "\\fonts"
 	files, err := os.ReadDir(fontDir)
 	if err != nil {
 		return err
@@ -269,7 +259,7 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 			continue
 		}
 		name := strings.TrimSuffix(f.Name(), f.Name()[strings.LastIndex(f.Name(), "."):])
-		path := fontDir + "/" + f.Name()
+		path := fontDir + "\\" + f.Name()
 		pdf.AddTTFFont(name, path)
 
 		for _, r := range style.Rules {
@@ -294,8 +284,8 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ Ruta construida con / para Windows
-	base := exeDir() + "/reports/" + report
+	// 🔹 Use backslashes for Windows paths
+	base := exeDir() + "\\reports\\" + report
 
 	info, err := os.Stat(base)
 	if err != nil || !info.IsDir() {
@@ -303,9 +293,9 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	templateFile := base + "/template.txt"
-	styleFile := base + "/style.xml"
-	outDir := base + "/output"
+	templateFile := base + "\\template.txt"
+	styleFile := base + "\\style.xml"
+	outDir := base + "\\output"
 	_ = os.MkdirAll(outDir, os.ModePerm)
 
 	tmplBytes, err := os.ReadFile(templateFile)
@@ -331,7 +321,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	_ = tmpl.Execute(&buf, data)
 
-	out := outDir + "/" + fmt.Sprintf("%s_%s.pdf", report, time.Now().Format("2006-01-02_15-04-05"))
+	out := outDir + "\\" + fmt.Sprintf("%s_%s.pdf", report, time.Now().Format("2006-01-02_15-04-05"))
 
 	if err := generatePDF(buf.String(), base, out, style); err != nil {
 		http.Error(w, err.Error(), 500)
