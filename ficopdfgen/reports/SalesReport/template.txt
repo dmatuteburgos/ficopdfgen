@@ -1,0 +1,9 @@
+Report Title: <bold>{{.Report.Title}}</bold>
+Date: {{.Report.Date}}
+
+Sales Summary:
+{{range .Report.Sales.Item}}
+- Product: {{.Product}}, Quantity: {{.Quantity}}, Revenue: {{.Revenue}}
+{{end}}
+
+Thank you for reviewing this report.

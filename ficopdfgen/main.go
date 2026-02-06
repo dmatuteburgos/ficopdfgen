@@ -1,285 +1,335 @@
 package main
 
 import (
-	"encoding/json"
+	"bytes"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
-	"sync"
+	"text/template"
 	"time"
 
-	"github.com/phpdave11/gofpdf"
-	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
+	"github.com/signintech/gopdf"
 )
 
-type Config struct {
-	SSH struct {
-		Host     string `json:"host"`
-		Port     int    `json:"port"`
-		User     string `json:"user"`
-		Password string `json:"password"`
-	} `json:"ssh"`
+//
+// -------------------- STYLE XML --------------------
+//
 
-	RemoteDirectory     string            `json:"remote_directory"`
-	PollIntervalSeconds int               `json:"poll_interval_seconds"`
-	FontSize            float64           `json:"font_size"`
-	Fonts               map[string]string `json:"fonts"`
-	Rules               []Rule            `json:"rules"`
-
-	PDF struct {
-		Orientation string `json:"orientation"`
-		Unit        string `json:"unit"`
-		PageSize    string `json:"page_size"`
-	} `json:"pdf"`
+type ReportStyle struct {
+	XMLName xml.Name `xml:"ReportStyle"`
+	PDF     struct {
+		PageSize    string  `xml:"PageSize"`
+		Orientation string  `xml:"Orientation"`
+		FontSize    float64 `xml:"FontSize"`
+		Width       float64 `xml:"Width"`
+		Height      float64 `xml:"Height"`
+	} `xml:"PDF"`
+	Rules []struct {
+		Tag  string `xml:"tag,attr"`
+		Font string `xml:"font,attr"`
+	} `xml:"Rules>Rule"`
 }
 
-type Rule struct {
-	Name      string `json:"name"`
-	Delimiter string `json:"delimiter"`
-	Font      string `json:"font"`
+//
+// -------------------- XML GENERIC PARSER --------------------
+//
+
+type xmlNode struct {
+	XMLName xml.Name
+	Content string    `xml:",chardata"`
+	Nodes   []xmlNode `xml:",any"`
 }
 
-func main() {
-	log.Println("Starting TXT => PDF service...")
-	cfg := loadConfig("config.json")
-	if cfg.PollIntervalSeconds <= 0 {
-		cfg.PollIntervalSeconds = 5
-	}
-	if cfg.FontSize <= 0 {
-		cfg.FontSize = 11
+func nodeToMap(n xmlNode) map[string]interface{} {
+	if len(n.Nodes) == 0 {
+		return map[string]interface{}{
+			n.XMLName.Local: strings.TrimSpace(n.Content),
+		}
 	}
 
-	sshClient := connectSSH(cfg)
-	defer sshClient.Close()
-	sftpClient, err := sftp.NewClient(sshClient)
+	result := make(map[string]interface{})
+	counts := make(map[string]int)
+
+	for _, child := range n.Nodes {
+		childMap := nodeToMap(child)
+		key := child.XMLName.Local
+		val := childMap[key]
+
+		if existing, ok := result[key]; ok {
+			switch e := existing.(type) {
+			case []interface{}:
+				result[key] = append(e, val)
+			default:
+				result[key] = []interface{}{e, val}
+			}
+		} else {
+			result[key] = val
+		}
+
+		counts[key]++
+	}
+
+	return map[string]interface{}{
+		n.XMLName.Local: result,
+	}
+}
+
+func parseXMLToMap(xmlBytes []byte) (map[string]interface{}, error) {
+	var root xmlNode
+	if err := xml.Unmarshal(xmlBytes, &root); err != nil {
+		return nil, err
+	}
+
+	// ALWAYS expose root node (Report, Invoice, Whatever)
+	return map[string]interface{}{
+		root.XMLName.Local: nodeToMap(root)[root.XMLName.Local],
+	}, nil
+}
+
+//
+// -------------------- LOAD STYLE --------------------
+//
+
+func loadStyle(path string) (*ReportStyle, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatal("Failed to create SFTP client:", err)
+		return nil, err
 	}
-	defer sftpClient.Close()
+	var s ReportStyle
+	return &s, xml.Unmarshal(b, &s)
+}
 
-	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
-	defer ticker.Stop()
+//
+// -------------------- PAGE SIZE --------------------
+//
 
-	for range ticker.C {
-		files, err := listRemoteFiles(sftpClient, cfg.RemoteDirectory)
-		if err != nil {
-			log.Println("Error listing files:", err)
-			continue
-		}
-		if len(files) == 0 {
-			log.Println("No files found.")
-			continue
-		}
+func pageSize(style *ReportStyle) (float64, float64) {
+	const mmToPt = 2.83465
 
-		log.Println("Found files:", files)
-		var wg sync.WaitGroup
-		for _, f := range files {
-			if strings.ToLower(path.Ext(f)) == ".txt" {
-				wg.Add(1)
-				go func(file string) {
-					defer wg.Done()
-					processTXTFile(cfg, sftpClient, file)
-				}(f)
+	var w, h float64
+	switch strings.ToUpper(style.PDF.PageSize) {
+	case "LETTER":
+		w, h = 612, 792
+	case "CUSTOM":
+		w = style.PDF.Width * mmToPt
+		h = style.PDF.Height * mmToPt
+	default: // A4
+		w, h = 595.28, 842
+	}
+
+	if strings.ToUpper(style.PDF.Orientation) == "L" {
+		return h, w
+	}
+	return w, h
+}
+
+//
+// -------------------- WORD WRAP --------------------
+//
+
+func wrap(pdf *gopdf.GoPdf, text, font string, size, maxW float64) []string {
+	pdf.SetFont(font, "", size)
+
+	words := strings.Fields(text)
+	var lines []string
+	line := ""
+
+	for _, w := range words {
+		test := strings.TrimSpace(line + " " + w)
+		width, _ := pdf.MeasureTextWidth(test)
+		if width > maxW && line != "" {
+			lines = append(lines, line)
+			line = w
+		} else {
+			if line == "" {
+				line = w
+			} else {
+				line += " " + w
 			}
 		}
-		wg.Wait()
 	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
 }
 
-// SSH/SFTP helpers
-func connectSSH(cfg Config) *ssh.Client {
-	conf := &ssh.ClientConfig{
-		User:            cfg.SSH.User,
-		Auth:            []ssh.AuthMethod{ssh.Password(cfg.SSH.Password)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         10 * time.Second,
-	}
-	addr := fmt.Sprintf("%s:%d", cfg.SSH.Host, cfg.SSH.Port)
-	client, err := ssh.Dial("tcp", addr, conf)
-	if err != nil {
-		log.Fatal("SSH connection failed:", err)
-	}
-	return client
+//
+// -------------------- STYLE TAG PARSER --------------------
+//
+
+type part struct {
+	Text string
+	Font string
 }
 
-func listRemoteFiles(client *sftp.Client, dir string) ([]string, error) {
-	var files []string
-	entries, err := client.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range entries {
-		if !e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-			files = append(files, e.Name())
+func parseStyled(line string, rules map[string]string) []part {
+	font := rules["normal"]
+	var out []part
+	buf := ""
+
+	flush := func() {
+		if buf != "" {
+			out = append(out, part{buf, font})
+			buf = ""
 		}
 	}
-	return files, nil
+
+	for len(line) > 0 {
+		switch {
+		case strings.HasPrefix(line, "<bold>"):
+			flush()
+			font = rules["bold"]
+			line = line[6:]
+		case strings.HasPrefix(line, "<italic>"):
+			flush()
+			font = rules["italic"]
+			line = line[8:]
+		case strings.HasPrefix(line, "</bold>"), strings.HasPrefix(line, "</italic>"):
+			flush()
+			font = rules["normal"]
+			line = line[strings.Index(line, ">")+1:]
+		default:
+			buf += string(line[0])
+			line = line[1:]
+		}
+	}
+	flush()
+	return out
 }
 
-func readRemoteFileSFTP(client *sftp.Client, remotePath string) ([]byte, error) {
-	f, err := client.Open(remotePath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(f)
-}
+//
+// -------------------- PDF WRITE --------------------
+//
 
-func uploadPDFSFTP(client *sftp.Client, remoteDir, localPDF string) error {
-	data, err := os.ReadFile(localPDF)
-	if err != nil {
-		return err
-	}
-	remotePath := path.Join(remoteDir, path.Base(localPDF))
-	f, err := client.Create(remotePath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.Write(data)
-	return err
-}
-
-// TXT -> PDF helpers
-func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
-	for name, path := range cfg.Fonts {
-		pdf.AddUTF8Font(name, "", path)
-	}
-}
-
-func escapePDFText(text string) string {
-	replacer := strings.NewReplacer(
-		"\\", "\\\\",
-		"(", "\\(",
-		")", "\\)",
-		"%", "\\%",
-	)
-	return replacer.Replace(text)
-}
-
-// Safe line writer
-func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
-	pageWidth, pageHeight := pdf.GetPageSize()
-	marginLeft, marginTop, marginRight, marginBottom := pdf.GetMargins()
-	maxWidth := pageWidth - marginLeft - marginRight
-	lineHeight := cfg.FontSize * 1.2
-
-	xStart, y := pdf.GetXY()
-	cursorX := xStart
-
-	if strings.TrimSpace(line) == "" {
-		pdf.SetXY(xStart, y+lineHeight)
-		return
+func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[string]string, pageW, pageH float64) {
+	fontSize := style.PDF.FontSize
+	if fontSize == 0 {
+		fontSize = 12
 	}
 
-	// Preserve all leading spaces
-	leadingSpaces := len(line) - len(strings.TrimLeft(line, " "))
-	cursorX += float64(leadingSpaces) * pdf.GetStringWidth(" ")
+	margin := 50.0
+	y := margin
 
-	chars := []rune(line)
-	currentFont := "normal"
-	if _, ok := cfg.Fonts[currentFont]; !ok {
-		currentFont = ""
-	}
-	pdf.SetFont(currentFont, "", cfg.FontSize)
+	for _, line := range strings.Split(content, "\n") {
+		parts := parseStyled(line, rules)
 
-	for i := 0; i < len(chars); {
-		// Try to match rules
-		font := currentFont
-		wordEnd := i + 1
-		for _, r := range cfg.Rules {
-			dlen := len([]rune(r.Delimiter))
-			if i+dlen*2 <= len(chars) {
-				start := string(chars[i : i+dlen])
-				end := string(chars[i+dlen : i+dlen*2])
-				if start == r.Delimiter && end == r.Delimiter {
-					font = r.Font
-					wordEnd = i + dlen*2
+		for _, p := range parts {
+			for _, l := range wrap(pdf, p.Text, p.Font, fontSize, pageW-2*margin) {
+				if y > pageH-margin {
+					pdf.AddPage()
+					y = margin
 				}
+				pdf.SetFont(p.Font, "", fontSize)
+				pdf.SetXY(margin, y)
+				pdf.Text(l)
+				y += fontSize * 1.5
 			}
 		}
-
-		word := string(chars[i:wordEnd])
-		word = escapePDFText(word)
-		pdf.SetFont(font, "", cfg.FontSize)
-
-		wordWidth := pdf.GetStringWidth(word)
-		if cursorX+wordWidth > maxWidth {
-			// Wrap line
-			cursorX = marginLeft
-			y += lineHeight
-			if y+lineHeight > pageHeight-marginBottom {
-				pdf.AddPage()
-				y = marginTop
-			}
-		}
-		pdf.SetXY(cursorX, y)
-		pdf.Write(lineHeight, word)
-		cursorX += wordWidth
-		i = wordEnd
 	}
-
-	pdf.SetXY(marginLeft, y+lineHeight)
 }
 
-func txtToPDF(cfg Config, data []byte, output string) error {
-	pdf := gofpdf.New(cfg.PDF.Orientation, cfg.PDF.Unit, cfg.PDF.PageSize, "")
-	loadFonts(pdf, cfg)
+//
+// -------------------- PDF GENERATION --------------------
+//
+
+func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
+	w, h := pageSize(style)
+
+	pdf := gopdf.GoPdf{}
+	pdf.Start(gopdf.Config{PageSize: gopdf.Rect{W: w, H: h}})
 	pdf.AddPage()
 
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		writeFormattedLine(pdf, cfg, line)
+	// Load fonts
+	fontDir := filepath.Join(reportFolder, "fonts")
+	files, err := os.ReadDir(fontDir)
+	if err != nil {
+		return err
 	}
 
-	return pdf.OutputFileAndClose(output)
+	rules := map[string]string{
+		"normal": "",
+		"bold":   "",
+		"italic": "",
+	}
+
+	for _, f := range files {
+		if f.IsDir() {
+			continue
+		}
+		name := strings.TrimSuffix(f.Name(), filepath.Ext(f.Name()))
+		path := filepath.Join(fontDir, f.Name())
+		pdf.AddTTFFont(name, path)
+
+		for _, r := range style.Rules {
+			if r.Font == name {
+				rules[strings.ToLower(r.Tag)] = name
+			}
+		}
+	}
+
+	writeText(&pdf, text, style, rules, w, h)
+	return pdf.WritePdf(output)
 }
 
-func processTXTFile(cfg Config, sftpClient *sftp.Client, filename string) {
-	log.Println("Processing file:", filename)
-	pdfName := strings.TrimSuffix(filename, path.Ext(filename)) + ".pdf"
-	remotePDFPath := path.Join(cfg.RemoteDirectory, pdfName)
+//
+// -------------------- HTTP HANDLER --------------------
+//
 
-	if _, err := sftpClient.Stat(remotePDFPath); err == nil {
-		log.Println("PDF already exists, skipping:", pdfName)
+func generateHandler(w http.ResponseWriter, r *http.Request) {
+	report := r.URL.Query().Get("reportName")
+	if report == "" {
+		http.Error(w, "reportName required", 400)
 		return
 	}
 
-	remotePath := path.Join(cfg.RemoteDirectory, filename)
-	data, err := readRemoteFileSFTP(sftpClient, remotePath)
+	base := filepath.Join("reports", report)
+	templateFile := filepath.Join(base, "template.txt")
+	styleFile := filepath.Join(base, "style.xml")
+	outDir := filepath.Join(base, "output")
+	_ = os.MkdirAll(outDir, 0755)
+
+	tmplBytes, _ := os.ReadFile(templateFile)
+	style, err := loadStyle(styleFile)
 	if err != nil {
-		log.Println("Failed to read remote file:", err)
+		http.Error(w, err.Error(), 500)
 		return
 	}
 
-	localPDF := os.TempDir() + "/" + pdfName
+	xmlBytes, _ := io.ReadAll(r.Body)
+	data, err := parseXMLToMap(xmlBytes)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 
-	go func() {
-		if err := txtToPDF(cfg, data, localPDF); err != nil {
-			log.Println("PDF generation failed:", err)
-			return
-		}
-		if err := uploadPDFSFTP(sftpClient, cfg.RemoteDirectory, localPDF); err != nil {
-			log.Println("Upload failed:", err)
-			return
-		}
-		log.Println("PDF generated and uploaded successfully:", pdfName)
-	}()
+	tmpl, _ := template.New("r").Parse(string(tmplBytes))
+	var buf bytes.Buffer
+	_ = tmpl.Execute(&buf, data)
+
+	out := filepath.Join(outDir,
+		fmt.Sprintf("%s_%s.pdf", report, time.Now().Format("2006-01-02_15-04-05")),
+	)
+
+	if err := generatePDF(buf.String(), base, out, style); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	w.Write([]byte("PDF created: " + out))
 }
 
-// Config loader
-func loadConfig(path string) Config {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		log.Fatal("Failed to read config:", err)
-	}
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Fatal("Failed to parse config:", err)
-	}
-	return cfg
+//
+// -------------------- MAIN --------------------
+//
+
+func main() {
+	http.HandleFunc("/generate", generateHandler)
+	fmt.Println("Report generator running on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }

@@ -1,0 +1,16 @@
+<Report>
+    <Title>Monthly Sales Report</Title>
+    <Date>2026-02-05</Date>
+    <Sales>
+        <Item>
+            <Product>Apples</Product>
+            <Quantity>150</Quantity>
+            <Revenue>300</Revenue>
+        </Item>
+        <Item>
+            <Product>Oranges</Product>
+            <Quantity>200</Quantity>
+            <Revenue>500</Revenue>
+        </Item>
+    </Sales>
+</Report>

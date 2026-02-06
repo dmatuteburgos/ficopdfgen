@@ -1,0 +1,4 @@
+curl -X POST \
+     -H "Content-Type: application/xml" \
+     --data-binary @sales_data.xml \
+     "http://localhost:8080/generate?reportName=SalesReport"

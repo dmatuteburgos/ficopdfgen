@@ -1,0 +1,14 @@
+<ReportStyle>
+    <PDF>
+        <PageSize>CUSTOM</PageSize>
+        <Orientation>L</Orientation> <!-- P = Portrait, L = Landscape -->
+        <Width>800</Width>   <!-- width in millimeters -->
+        <Height>500</Height> <!-- height in millimeters -->
+        <FontSize>12</FontSize>
+    </PDF>
+    <Rules>
+        <Rule tag="normal" font="Normal"/>
+        <Rule tag="bold" font="Bold"/>
+        <Rule tag="italic" font="Italic"/>
+    </Rules>
+</ReportStyle>
