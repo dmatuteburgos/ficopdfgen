@@ -171,7 +171,7 @@ func escapePDFText(text string) string {
 	return replacer.Replace(text)
 }
 
-// Writes one line safely, preserves indentation, applies rules, and escapes special chars
+// Safe line writer
 func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	pageWidth, pageHeight := pdf.GetPageSize()
 	marginLeft, marginTop, marginRight, marginBottom := pdf.GetMargins()
@@ -198,6 +198,11 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	pdf.SetFont(currentFont, "", cfg.FontSize)
 
 	for _, word := range words {
+		if word == "" {
+			cursorX += pdf.GetStringWidth(" ")
+			continue
+		}
+
 		font := currentFont
 		for _, r := range cfg.Rules {
 			if len(word) >= 2*len(r.Delimiter) &&
@@ -209,19 +214,18 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 			}
 		}
 
-		word = escapePDFText(word) // Escape special chars
-
-		if word == "" {
-			cursorX += pdf.GetStringWidth(" ")
-			continue
-		}
+		word = escapePDFText(word)
 
 		pdf.SetFont(font, "", cfg.FontSize)
 		spaceWidth := pdf.GetStringWidth(" ")
 
 		for len(word) > 0 {
-			wordWidth := pdf.GetStringWidth(word)
+			if len(word) == 0 {
+				break
+			}
+
 			remaining := maxWidth - cursorX
+			wordWidth := pdf.GetStringWidth(word)
 
 			if wordWidth <= remaining {
 				pdf.SetXY(cursorX, y)
@@ -234,6 +238,9 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 					fit++
 				}
 				fit--
+				if fit <= 0 {
+					fit = 1
+				}
 				pdf.SetXY(cursorX, y)
 				pdf.Write(lineHeight, word[:fit])
 				word = word[fit:]
@@ -274,14 +281,9 @@ func txtToPDF(cfg Config, data []byte, output string) error {
 	loadFonts(pdf, cfg)
 	pdf.AddPage()
 
-	paragraphs := strings.Split(string(data), "\n\n")
-	for _, para := range paragraphs {
-		lines := strings.Split(para, "\n")
-		for _, line := range lines {
-			writeFormattedLine(pdf, cfg, line)
-		}
-		_, y := pdf.GetXY()
-		pdf.SetXY(10, y+cfg.FontSize*1.2)
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		writeFormattedLine(pdf, cfg, line)
 	}
 
 	return pdf.OutputFileAndClose(output)
