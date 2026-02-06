@@ -31,9 +31,9 @@ type Config struct {
 	Rules               []Rule            `json:"rules"`
 
 	PDF struct {
-		Orientation string `json:"orientation"` // "P" or "L"
-		Unit        string `json:"unit"`        // "mm", "pt", "in"
-		PageSize    string `json:"page_size"`   // "A4", "Letter", etc.
+		Orientation string `json:"orientation"`
+		Unit        string `json:"unit"`
+		PageSize    string `json:"page_size"`
 	} `json:"pdf"`
 }
 
@@ -44,9 +44,8 @@ type Rule struct {
 }
 
 func main() {
-	log.Println("Starting TXT -> PDF service...")
+	log.Println("Starting TXT => PDF service...")
 	cfg := loadConfig("config.json")
-
 	if cfg.PollIntervalSeconds <= 0 {
 		cfg.PollIntervalSeconds = 5
 	}
@@ -54,15 +53,8 @@ func main() {
 		cfg.FontSize = 11
 	}
 
-	for name, path := range cfg.Fonts {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			log.Fatalf("Font %s not found at path: %s", name, path)
-		}
-	}
-
 	sshClient := connectSSH(cfg)
 	defer sshClient.Close()
-
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		log.Fatal("Failed to create SFTP client:", err)
@@ -86,8 +78,7 @@ func main() {
 		log.Println("Found files:", files)
 		var wg sync.WaitGroup
 		for _, f := range files {
-			ext := strings.ToLower(path.Ext(f))
-			if ext == ".txt" {
+			if strings.ToLower(path.Ext(f)) == ".txt" {
 				wg.Add(1)
 				go func(file string) {
 					defer wg.Done()
@@ -99,7 +90,7 @@ func main() {
 	}
 }
 
-// --- SSH/SFTP helpers ---
+// SSH/SFTP helpers
 func connectSSH(cfg Config) *ssh.Client {
 	conf := &ssh.ClientConfig{
 		User:            cfg.SSH.User,
@@ -153,14 +144,13 @@ func uploadPDFSFTP(client *sftp.Client, remoteDir, localPDF string) error {
 	return err
 }
 
-// --- TXT -> PDF ---
+// TXT -> PDF helpers
 func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	for name, path := range cfg.Fonts {
 		pdf.AddUTF8Font(name, "", path)
 	}
 }
 
-// Escape PDF special characters
 func escapePDFText(text string) string {
 	replacer := strings.NewReplacer(
 		"\\", "\\\\",
@@ -186,91 +176,51 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 		return
 	}
 
-	// Preserve leading spaces
+	// Preserve all leading spaces
 	leadingSpaces := len(line) - len(strings.TrimLeft(line, " "))
 	cursorX += float64(leadingSpaces) * pdf.GetStringWidth(" ")
 
-	words := strings.Fields(strings.TrimSpace(line))
+	chars := []rune(line)
 	currentFont := "normal"
 	if _, ok := cfg.Fonts[currentFont]; !ok {
 		currentFont = ""
 	}
 	pdf.SetFont(currentFont, "", cfg.FontSize)
 
-	for _, word := range words {
-		if word == "" {
-			cursorX += pdf.GetStringWidth(" ")
-			continue
-		}
-
+	for i := 0; i < len(chars); {
+		// Try to match rules
 		font := currentFont
+		wordEnd := i + 1
 		for _, r := range cfg.Rules {
-			if len(word) >= 2*len(r.Delimiter) &&
-				strings.HasPrefix(word, r.Delimiter) &&
-				strings.HasSuffix(word, r.Delimiter) {
-				font = r.Font
-				word = word[len(r.Delimiter) : len(word)-len(r.Delimiter)]
-				break
+			dlen := len([]rune(r.Delimiter))
+			if i+dlen*2 <= len(chars) {
+				start := string(chars[i : i+dlen])
+				end := string(chars[i+dlen : i+dlen*2])
+				if start == r.Delimiter && end == r.Delimiter {
+					font = r.Font
+					wordEnd = i + dlen*2
+				}
 			}
 		}
 
+		word := string(chars[i:wordEnd])
 		word = escapePDFText(word)
-
 		pdf.SetFont(font, "", cfg.FontSize)
-		spaceWidth := pdf.GetStringWidth(" ")
 
-		for len(word) > 0 {
-			if len(word) == 0 {
-				break
-			}
-
-			remaining := maxWidth - cursorX
-			wordWidth := pdf.GetStringWidth(word)
-
-			if wordWidth <= remaining {
-				pdf.SetXY(cursorX, y)
-				pdf.Write(lineHeight, word)
-				cursorX += wordWidth + spaceWidth
-				word = ""
-			} else if wordWidth > maxWidth {
-				fit := 1
-				for fit <= len(word) && pdf.GetStringWidth(word[:fit]) <= maxWidth {
-					fit++
-				}
-				fit--
-				if fit <= 0 {
-					fit = 1
-				}
-				pdf.SetXY(cursorX, y)
-				pdf.Write(lineHeight, word[:fit])
-				word = word[fit:]
-				cursorX = marginLeft
-				y += lineHeight
-				if y+lineHeight > pageHeight-marginBottom {
-					pdf.AddPage()
-					y = marginTop
-				}
-			} else {
-				cursorX = marginLeft
-				y += lineHeight
-				if y+lineHeight > pageHeight-marginBottom {
-					pdf.AddPage()
-					y = marginTop
-				}
-			}
-		}
-
-		if cursorX+spaceWidth > maxWidth {
+		wordWidth := pdf.GetStringWidth(word)
+		if cursorX+wordWidth > maxWidth {
+			// Wrap line
 			cursorX = marginLeft
 			y += lineHeight
 			if y+lineHeight > pageHeight-marginBottom {
 				pdf.AddPage()
 				y = marginTop
 			}
-		} else {
-			cursorX += spaceWidth
 		}
 		pdf.SetXY(cursorX, y)
+		pdf.Write(lineHeight, word)
+		cursorX += wordWidth
+		i = wordEnd
 	}
 
 	pdf.SetXY(marginLeft, y+lineHeight)
@@ -289,7 +239,6 @@ func txtToPDF(cfg Config, data []byte, output string) error {
 	return pdf.OutputFileAndClose(output)
 }
 
-// --- File processing ---
 func processTXTFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	log.Println("Processing file:", filename)
 	pdfName := strings.TrimSuffix(filename, path.Ext(filename)) + ".pdf"
@@ -322,7 +271,7 @@ func processTXTFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	}()
 }
 
-// --- Config loader ---
+// Config loader
 func loadConfig(path string) Config {
 	data, err := os.ReadFile(path)
 	if err != nil {
