@@ -145,7 +145,15 @@ func listRemoteFiles(client *sftp.Client, dir string) ([]string, error) {
 func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	log.Println("Processing file:", filename)
 
-	// Build remote path using forward slash
+	pdfName := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".pdf"
+	remotePDFPath := cfg.RemoteDirectory + "/" + pdfName
+
+	// Skip if PDF already exists
+	if _, err := sftpClient.Stat(remotePDFPath); err == nil {
+		log.Println("PDF already exists, skipping:", pdfName)
+		return
+	}
+
 	remotePath := cfg.RemoteDirectory + "/" + filename
 	log.Println("Full remote path:", remotePath)
 
@@ -156,7 +164,6 @@ func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	}
 	log.Printf("Read %d bytes from %s\n", len(data), remotePath)
 
-	pdfName := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".pdf"
 	localPDF := os.TempDir() + "/" + pdfName
 	log.Println("Generating PDF at:", localPDF)
 
@@ -223,18 +230,23 @@ func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	}
 }
 
-/* ===== Rule-driven formatter with escaping & wrapping ===== */
+/* ===== Inline formatter with escaped delimiters ===== */
 
-func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight float64) {
+func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight float64) {
 	pageWidth, _ := pdf.GetPageSize()
 	marginLeft, _, marginRight, _ := pdf.GetMargins()
 	maxWidth := pageWidth - marginLeft - marginRight
+
+	xStart, y := pdf.GetXY()
+	cursorX := xStart
 
 	currentFont := "normal"
 	if _, ok := cfg.Fonts[currentFont]; !ok {
 		currentFont = ""
 	}
+	pdf.SetFont(currentFont, "", cfg.FontSize)
 
+	i := 0
 	var buf strings.Builder
 	flush := func() {
 		if buf.Len() == 0 {
@@ -245,11 +257,23 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight fl
 			fontToUse = "normal"
 		}
 		pdf.SetFont(fontToUse, "", cfg.FontSize)
-		pdf.MultiCell(maxWidth, lineHeight, buf.String(), "", "L", false)
+		str := buf.String()
 		buf.Reset()
+
+		// Measure width
+		width := pdf.GetStringWidth(str)
+		if cursorX+width > maxWidth {
+			// Wrap to next line
+			cursorX = marginLeft
+			y += lineHeight
+			pdf.SetXY(cursorX, y)
+		}
+
+		pdf.SetXY(cursorX, y)
+		pdf.Write(lineHeight, str)
+		cursorX += width
 	}
 
-	i := 0
 	for i < len(line) {
 		escaped := false
 		if line[i] == '\\' {
@@ -290,6 +314,7 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight fl
 		i++
 	}
 	flush()
+	pdf.SetXY(marginLeft, y+lineHeight)
 }
 
 /* ================= TXT ================= */
@@ -302,7 +327,7 @@ func txtToPDF(cfg Config, data []byte, output string) error {
 	lineHeight := 6.0
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
-		writeFormattedLine(pdf, cfg, line, lineHeight)
+		writeFormattedLineInline(pdf, cfg, line, lineHeight)
 	}
 
 	err := pdf.OutputFileAndClose(output)
@@ -338,7 +363,7 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 		xStart, y := pdf.GetXY()
 		for i, cell := range row {
 			pdf.SetXY(xStart+float64(i)*colWidth, y)
-			writeFormattedLine(pdf, cfg, cell, lineHeight)
+			writeFormattedLineInline(pdf, cfg, cell, lineHeight)
 		}
 		pdf.SetXY(xStart, y+lineHeight)
 	}
