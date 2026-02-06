@@ -164,24 +164,24 @@ func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	}
 }
 
-// Improved line writer: handles long words and wraps properly
+// Optimized line writer with word-packing and page breaks
 func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight float64) {
-	pageWidth, _ := pdf.GetPageSize()
-	marginLeft, _, marginRight, _ := pdf.GetMargins()
+	pageWidth, pageHeight := pdf.GetPageSize()
+	marginLeft, marginTop, marginRight, marginBottom := pdf.GetMargins()
 	maxWidth := pageWidth - marginLeft - marginRight
-
 	xStart, y := pdf.GetXY()
 	cursorX := xStart
+
+	words := strings.Fields(line)
 	currentFont := "normal"
 	if _, ok := cfg.Fonts[currentFont]; !ok {
 		currentFont = ""
 	}
 	pdf.SetFont(currentFont, "", cfg.FontSize)
 
-	words := strings.Fields(line)
-	for _, word := range words {
+	for i := 0; i < len(words); i++ {
+		word := words[i]
 		font := currentFont
-
 		for _, r := range cfg.Rules {
 			if strings.HasPrefix(word, r.Delimiter) && strings.HasSuffix(word, r.Delimiter) {
 				font = r.Font
@@ -190,42 +190,41 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string, lineHei
 		}
 		pdf.SetFont(font, "", cfg.FontSize)
 
-		for len(word) > 0 {
-			remainingWidth := maxWidth - cursorX
-			fit := 0
-			for i := 1; i <= len(word); i++ {
-				if pdf.GetStringWidth(word[:i]) > remainingWidth {
-					break
-				}
-				fit = i
-			}
-			if fit == 0 {
-				cursorX = marginLeft
-				y += lineHeight
-				pdf.SetXY(cursorX, y)
-				fit = 1
-			}
-
-			pdf.SetXY(cursorX, y)
-			pdf.Write(lineHeight, word[:fit])
-			cursorX += pdf.GetStringWidth(word[:fit])
-			word = word[fit:]
-			if len(word) > 0 {
-				cursorX = marginLeft
-				y += lineHeight
-				pdf.SetXY(cursorX, y)
-			}
-		}
-
-		// Add space
-		spaceWidth := pdf.GetStringWidth(" ")
-		if cursorX+spaceWidth > maxWidth {
+		wordWidth := pdf.GetStringWidth(word + " ")
+		if cursorX+wordWidth > maxWidth {
 			cursorX = marginLeft
 			y += lineHeight
-		} else {
-			cursorX += spaceWidth
 		}
+
+		// Check page bottom
+		if y+lineHeight > pageHeight-marginBottom {
+			pdf.AddPage()
+			y = marginTop
+			cursorX = marginLeft
+		}
+
+		// Handle extremely long words
+		for wordWidth > maxWidth {
+			fit := 1
+			for fit <= len(word) && pdf.GetStringWidth(word[:fit]) <= maxWidth {
+				fit++
+			}
+			fit--
+			pdf.SetXY(cursorX, y)
+			pdf.Write(lineHeight, word[:fit])
+			word = word[fit:]
+			wordWidth = pdf.GetStringWidth(word + " ")
+			cursorX = marginLeft
+			y += lineHeight
+			if y+lineHeight > pageHeight-marginBottom {
+				pdf.AddPage()
+				y = marginTop
+			}
+		}
+
 		pdf.SetXY(cursorX, y)
+		pdf.Write(lineHeight, word+" ")
+		cursorX += pdf.GetStringWidth(word + " ")
 	}
 
 	pdf.SetXY(marginLeft, y+lineHeight)
@@ -235,12 +234,10 @@ func txtToPDF(cfg Config, data []byte, output string) error {
 	pdf := gofpdf.New(cfg.PDF.Orientation, cfg.PDF.Unit, cfg.PDF.PageSize, "")
 	loadFonts(pdf, cfg)
 	pdf.AddPage()
-
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		writeFormattedLineInline(pdf, cfg, line, 6)
 	}
-
 	return pdf.OutputFileAndClose(output)
 }
 
@@ -250,6 +247,7 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 	if err != nil || len(records) == 0 {
 		return err
 	}
+
 	pdf := gofpdf.New(cfg.PDF.Orientation, cfg.PDF.Unit, cfg.PDF.PageSize, "")
 	loadFonts(pdf, cfg)
 	pdf.AddPage()
@@ -272,7 +270,6 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 		}
 		pdf.SetXY(xStart, y+lineHeight)
 	}
-
 	return pdf.OutputFileAndClose(output)
 }
 
