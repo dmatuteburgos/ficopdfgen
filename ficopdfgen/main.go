@@ -223,10 +223,13 @@ func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	}
 }
 
-/* ===== Rule-driven formatter with escaping ===== */
+/* ===== Rule-driven formatter with escaping & wrapping ===== */
 
 func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight float64) {
-	x, y := pdf.GetXY()
+	pageWidth, _ := pdf.GetPageSize()
+	marginLeft, _, marginRight, _ := pdf.GetMargins()
+	maxWidth := pageWidth - marginLeft - marginRight
+
 	currentFont := "normal"
 	if _, ok := cfg.Fonts[currentFont]; !ok {
 		currentFont = ""
@@ -242,7 +245,7 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight fl
 			fontToUse = "normal"
 		}
 		pdf.SetFont(fontToUse, "", cfg.FontSize)
-		pdf.Write(lineHeight, buf.String())
+		pdf.MultiCell(maxWidth, lineHeight, buf.String(), "", "L", false)
 		buf.Reset()
 	}
 
@@ -287,7 +290,6 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight fl
 		i++
 	}
 	flush()
-	pdf.SetXY(x, y+lineHeight)
 }
 
 /* ================= TXT ================= */
