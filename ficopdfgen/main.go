@@ -92,7 +92,7 @@ func main() {
 
 		var wg sync.WaitGroup
 		for _, f := range files {
-			ext := strings.ToLower(filepath.Ext(f))
+			ext := strings.ToLower(f[len(f)-4:]) // .txt or .csv
 			if ext == ".txt" || ext == ".csv" {
 				wg.Add(1)
 				go func(file string) {
@@ -140,11 +140,14 @@ func listRemoteFiles(client *sftp.Client, dir string) ([]string, error) {
 	return files, nil
 }
 
-/* ================= PROCESS ================= */
+/* ================= PROCESS FILE ================= */
 
 func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	log.Println("Processing file:", filename)
-	remotePath := filepath.Join(cfg.RemoteDirectory, filename)
+
+	// Build remote path using forward slash
+	remotePath := cfg.RemoteDirectory + "/" + filename
+	log.Println("Full remote path:", remotePath)
 
 	data, err := readRemoteFileSFTP(sftpClient, remotePath)
 	if err != nil {
@@ -154,7 +157,7 @@ func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	log.Printf("Read %d bytes from %s\n", len(data), remotePath)
 
 	pdfName := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".pdf"
-	localPDF := filepath.Join(os.TempDir(), pdfName)
+	localPDF := os.TempDir() + "/" + pdfName
 	log.Println("Generating PDF at:", localPDF)
 
 	var pdfErr error
@@ -178,7 +181,7 @@ func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	log.Println("PDF uploaded successfully:", pdfName)
 }
 
-/* ================= REMOTE FILE ================= */
+/* ================= SFTP FILE OPERATIONS ================= */
 
 func readRemoteFileSFTP(client *sftp.Client, path string) ([]byte, error) {
 	f, err := client.Open(path)
@@ -200,7 +203,7 @@ func uploadPDFSFTP(client *sftp.Client, dir, localPDF string) error {
 		return err
 	}
 
-	remotePath := filepath.Join(dir, filepath.Base(localPDF))
+	remotePath := dir + "/" + filepath.Base(localPDF)
 	f, err := client.Create(remotePath)
 	if err != nil {
 		return err
@@ -211,7 +214,7 @@ func uploadPDFSFTP(client *sftp.Client, dir, localPDF string) error {
 	return err
 }
 
-/* ================= PDF ================= */
+/* ================= PDF GENERATION ================= */
 
 func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	for name, path := range cfg.Fonts {
@@ -245,7 +248,6 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight fl
 
 	i := 0
 	for i < len(line) {
-		// Escaped delimiter
 		escaped := false
 		if line[i] == '\\' {
 			for _, r := range cfg.Rules {
@@ -262,7 +264,6 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight fl
 			continue
 		}
 
-		// Rule match
 		matched := false
 		for _, r := range cfg.Rules {
 			d := r.Delimiter
