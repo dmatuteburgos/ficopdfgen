@@ -17,6 +17,18 @@ import (
 )
 
 //
+// -------------------- EXE DIR (WINDOWS FIX) --------------------
+//
+
+func exeDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		log.Fatal(err)
+	}
+	return filepath.Dir(exe)
+}
+
+//
 // -------------------- STYLE XML --------------------
 //
 
@@ -53,7 +65,6 @@ func nodeToMap(n xmlNode) map[string]interface{} {
 	}
 
 	result := make(map[string]interface{})
-	counts := make(map[string]int)
 
 	for _, child := range n.Nodes {
 		childMap := nodeToMap(child)
@@ -70,8 +81,6 @@ func nodeToMap(n xmlNode) map[string]interface{} {
 		} else {
 			result[key] = val
 		}
-
-		counts[key]++
 	}
 
 	return map[string]interface{}{
@@ -85,7 +94,6 @@ func parseXMLToMap(xmlBytes []byte) (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	// ALWAYS expose root node (Report, Invoice, Whatever)
 	return map[string]interface{}{
 		root.XMLName.Local: nodeToMap(root)[root.XMLName.Local],
 	}, nil
@@ -118,7 +126,7 @@ func pageSize(style *ReportStyle) (float64, float64) {
 	case "CUSTOM":
 		w = style.PDF.Width * mmToPt
 		h = style.PDF.Height * mmToPt
-	default: // A4
+	default:
 		w, h = 595.28, 842
 	}
 
@@ -245,7 +253,6 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 	pdf.Start(gopdf.Config{PageSize: gopdf.Rect{W: w, H: h}})
 	pdf.AddPage()
 
-	// Load fonts
 	fontDir := filepath.Join(reportFolder, "fonts")
 	files, err := os.ReadDir(fontDir)
 	if err != nil {
@@ -288,13 +295,21 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	base := filepath.Join("reports", report)
+	// ✅ WINDOWS-SAFE PATH
+	base := filepath.Join(exeDir(), "reports", report)
+
 	templateFile := filepath.Join(base, "template.txt")
 	styleFile := filepath.Join(base, "style.xml")
 	outDir := filepath.Join(base, "output")
-	_ = os.MkdirAll(outDir, 0755)
 
-	tmplBytes, _ := os.ReadFile(templateFile)
+	_ = os.MkdirAll(outDir, os.ModePerm)
+
+	tmplBytes, err := os.ReadFile(templateFile)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
 	style, err := loadStyle(styleFile)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -312,7 +327,8 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	_ = tmpl.Execute(&buf, data)
 
-	out := filepath.Join(outDir,
+	out := filepath.Join(
+		outDir,
 		fmt.Sprintf("%s_%s.pdf", report, time.Now().Format("2006-01-02_15-04-05")),
 	)
 
