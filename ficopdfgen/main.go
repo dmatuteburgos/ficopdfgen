@@ -164,7 +164,7 @@ func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	}
 }
 
-// Optimized line writer: no extra empty lines, wraps properly, safety margins
+// Corrected line writer: no extra empty lines, wraps properly
 func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	pageWidth, pageHeight := pdf.GetPageSize()
 	marginLeft, marginTop, marginRight, marginBottom := pdf.GetMargins()
@@ -198,13 +198,11 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
 			remaining := maxWidth - cursorX
 
 			if wordWidth <= remaining {
-				// Word fits → write it
 				pdf.SetXY(cursorX, y)
 				pdf.Write(lineHeight, word)
 				cursorX += wordWidth + spaceWidth
 				word = ""
 			} else if wordWidth > maxWidth {
-				// Word longer than line → split
 				fit := 1
 				for fit <= len(word) && pdf.GetStringWidth(word[:fit]) <= maxWidth {
 					fit++
@@ -220,7 +218,6 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
 					y = marginTop
 				}
 			} else {
-				// Word too wide for remaining line → move to next line
 				cursorX = marginLeft
 				y += lineHeight
 				if y+lineHeight > pageHeight-marginBottom {
@@ -229,7 +226,7 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
 				}
 			}
 		}
-		// Add space between words
+
 		if cursorX+spaceWidth > maxWidth {
 			cursorX = marginLeft
 			y += lineHeight
@@ -271,11 +268,11 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 	pageWidth, _ := pdf.GetPageSize()
 	marginLeft, _, marginRight, _ := pdf.GetMargins()
 	usableWidth := pageWidth - marginLeft - marginRight
-
 	lineHeight := cfg.FontSize * 1.2
+
 	colCount := len(records[0])
 
-	// Dynamic column widths based on content
+	// Compute dynamic column widths safely
 	colWidths := make([]float64, colCount)
 	for i := 0; i < colCount; i++ {
 		maxW := 0.0
@@ -287,14 +284,14 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 				}
 			}
 		}
-		colWidths[i] = maxW + 4 // padding
+		colWidths[i] = maxW + 4
 	}
+
 	totalWidth := 0.0
 	for _, w := range colWidths {
 		totalWidth += w
 	}
 	if totalWidth > usableWidth {
-		// Scale down to fit page width
 		scale := usableWidth / totalWidth
 		for i := range colWidths {
 			colWidths[i] *= scale
@@ -302,10 +299,17 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 	}
 
 	for _, row := range records {
+		if len(row) == 0 {
+			continue
+		}
 		xStart, y := pdf.GetXY()
 		cursorX := xStart
-		for i, cell := range row {
+		for i := 0; i < colCount; i++ {
 			pdf.SetXY(cursorX, y)
+			cell := ""
+			if i < len(row) {
+				cell = row[i]
+			}
 			writeFormattedLineInline(pdf, cfg, cell)
 			cursorX += colWidths[i]
 		}
