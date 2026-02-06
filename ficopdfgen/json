@@ -1,0 +1,22 @@
+{
+  "ssh": {
+    "host": "192.168.1.100",
+    "port": 22,
+    "user": "remoteuser",
+    "password": "remotepassword"
+  },
+  "remote_directory": "/home/remoteuser/watch",
+  "poll_interval_seconds": 5,
+  "fonts": {
+    "header": {
+      "name": "HeaderFont",
+      "file": "fonts/Header.ttf",
+      "size": 16
+    },
+    "body": {
+      "name": "BodyFont",
+      "file": "fonts/Body.ttf",
+      "size": 11
+    }
+  }
+}
