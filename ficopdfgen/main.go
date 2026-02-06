@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,7 +44,7 @@ type Rule struct {
 }
 
 func main() {
-	log.Println("Starting program...")
+	log.Println("Starting TXT -> PDF service...")
 	cfg := loadConfig("config.json")
 
 	if cfg.PollIntervalSeconds <= 0 {
@@ -56,6 +54,7 @@ func main() {
 		cfg.FontSize = 11
 	}
 
+	// Check fonts exist
 	for name, path := range cfg.Fonts {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			log.Fatalf("Font %s not found at path: %s", name, path)
@@ -88,12 +87,12 @@ func main() {
 		log.Println("Found files:", files)
 		var wg sync.WaitGroup
 		for _, f := range files {
-			ext := strings.ToLower(f[len(f)-4:])
-			if ext == ".txt" || ext == ".csv" {
+			ext := strings.ToLower(path.Ext(f))
+			if ext == ".txt" {
 				wg.Add(1)
 				go func(file string) {
 					defer wg.Done()
-					processFile(cfg, sftpClient, file)
+					processTXTFile(cfg, sftpClient, file)
 				}(f)
 			}
 		}
@@ -102,7 +101,6 @@ func main() {
 }
 
 // --- SSH/SFTP helpers ---
-
 func connectSSH(cfg Config) *ssh.Client {
 	conf := &ssh.ClientConfig{
 		User:            cfg.SSH.User,
@@ -156,16 +154,15 @@ func uploadPDFSFTP(client *sftp.Client, remoteDir, localPDF string) error {
 	return err
 }
 
-// --- PDF generation ---
-
+// --- TXT -> PDF ---
 func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	for name, path := range cfg.Fonts {
 		pdf.AddUTF8Font(name, "", path)
 	}
 }
 
-// Writes a single line with formatting rules
-func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
+// Writes one line applying formatting rules
+func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	pageWidth, pageHeight := pdf.GetPageSize()
 	marginLeft, marginTop, marginRight, marginBottom := pdf.GetMargins()
 	maxWidth := pageWidth - marginLeft - marginRight
@@ -175,6 +172,11 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	cursorX := xStart
 
 	words := strings.Fields(line)
+	if len(words) == 0 {
+		pdf.SetXY(xStart, y+lineHeight)
+		return
+	}
+
 	currentFont := "normal"
 	if _, ok := cfg.Fonts[currentFont]; !ok {
 		currentFont = ""
@@ -190,6 +192,7 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
 			}
 		}
 		pdf.SetFont(font, "", cfg.FontSize)
+
 		spaceWidth := pdf.GetStringWidth(" ")
 
 		for len(word) > 0 {
@@ -242,103 +245,31 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	pdf.SetXY(marginLeft, y+lineHeight)
 }
 
-// --- TXT to PDF (preserving paragraph spacing) ---
 func txtToPDF(cfg Config, data []byte, output string) error {
 	pdf := gofpdf.New(cfg.PDF.Orientation, cfg.PDF.Unit, cfg.PDF.PageSize, "")
 	loadFonts(pdf, cfg)
 	pdf.AddPage()
-	paragraphs := strings.Split(string(data), "\n\n") // preserve paragraph breaks
+
+	paragraphs := strings.Split(string(data), "\n\n")
 	for _, para := range paragraphs {
 		lines := strings.Split(para, "\n")
 		for _, line := range lines {
-			writeFormattedLineInline(pdf, cfg, line)
+			if strings.TrimSpace(line) == "" {
+				_, y := pdf.GetXY()
+				pdf.SetXY(10, y+cfg.FontSize*1.2)
+				continue
+			}
+			writeFormattedLine(pdf, cfg, line)
 		}
-		// Add extra line between paragraphs
 		_, y := pdf.GetXY()
 		pdf.SetXY(10, y+cfg.FontSize*1.2)
 	}
-	return pdf.OutputFileAndClose(output)
-}
-
-// --- CSV with vertical auto-wrap ---
-func csvToPDF(cfg Config, data []byte, output string) error {
-	r := csv.NewReader(bytes.NewReader(data))
-	records, err := r.ReadAll()
-	if err != nil || len(records) == 0 {
-		return err
-	}
-
-	pdf := gofpdf.New(cfg.PDF.Orientation, cfg.PDF.Unit, cfg.PDF.PageSize, "")
-	loadFonts(pdf, cfg)
-	pdf.AddPage()
-
-	pageWidth, pageHeight := pdf.GetPageSize()
-	marginLeft, marginTop, marginRight, marginBottom := pdf.GetMargins()
-	usableWidth := pageWidth - marginLeft - marginRight
-	lineHeight := cfg.FontSize * 1.2
-
-	colCount := len(records[0])
-	colWidths := make([]float64, colCount)
-	for i := 0; i < colCount; i++ {
-		colWidths[i] = usableWidth / float64(colCount)
-	}
-
-	for _, row := range records {
-		if len(row) == 0 {
-			continue
-		}
-		xStart, y := pdf.GetXY()
-
-		// Compute row height for wrapping
-		rowHeight := lineHeight
-		for i := 0; i < colCount; i++ {
-			var cell string
-			if i < len(row) {
-				cell = row[i]
-			}
-			lines := pdf.SplitLines([]byte(cell), colWidths[i]-2)
-			if float64(len(lines))*lineHeight > rowHeight {
-				rowHeight = float64(len(lines)) * lineHeight
-			}
-		}
-
-		// Write each cell
-		cursorX := xStart
-		for i := 0; i < colCount; i++ {
-			var cell string
-			if i < len(row) {
-				cell = row[i]
-			}
-			pdf.SetXY(cursorX, y)
-			writeMultilineCell(pdf, cfg, colWidths[i], rowHeight, lineHeight, cell)
-			cursorX += colWidths[i]
-		}
-
-		// Move to next row
-		y += rowHeight
-		if y+rowHeight > pageHeight-marginBottom {
-			pdf.AddPage()
-			y = marginTop
-		}
-		pdf.SetXY(xStart, y)
-	}
 
 	return pdf.OutputFileAndClose(output)
-}
-
-func writeMultilineCell(pdf *gofpdf.Fpdf, cfg Config, w, h, lineHeight float64, text string) {
-	lines := pdf.SplitLines([]byte(text), w-2)
-	x, y := pdf.GetXY()
-	for _, line := range lines {
-		writeFormattedLineInline(pdf, cfg, string(line))
-		y += lineHeight
-		pdf.SetXY(x, y)
-	}
 }
 
 // --- File processing ---
-
-func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
+func processTXTFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	log.Println("Processing file:", filename)
 	pdfName := strings.TrimSuffix(filename, path.Ext(filename)) + ".pdf"
 	remotePDFPath := path.Join(cfg.RemoteDirectory, pdfName)
@@ -356,17 +287,10 @@ func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	}
 
 	localPDF := os.TempDir() + "/" + pdfName
-	ext := strings.ToLower(path.Ext(filename))
 
 	go func() {
-		var pdfErr error
-		if ext == ".txt" {
-			pdfErr = txtToPDF(cfg, data, localPDF)
-		} else {
-			pdfErr = csvToPDF(cfg, data, localPDF)
-		}
-		if pdfErr != nil {
-			log.Println("PDF generation failed:", pdfErr)
+		if err := txtToPDF(cfg, data, localPDF); err != nil {
+			log.Println("PDF generation failed:", err)
 			return
 		}
 		if err := uploadPDFSFTP(sftpClient, cfg.RemoteDirectory, localPDF); err != nil {
@@ -378,7 +302,6 @@ func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
 }
 
 // --- Config loader ---
-
 func loadConfig(path string) Config {
 	data, err := os.ReadFile(path)
 	if err != nil {
