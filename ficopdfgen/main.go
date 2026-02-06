@@ -16,7 +16,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-/* ---------------- CONFIG ---------------- */
+/* ================= CONFIG ================= */
 
 type Config struct {
 	SSH struct {
@@ -29,25 +29,27 @@ type Config struct {
 	RemoteDirectory     string `json:"remote_directory"`
 	PollIntervalSeconds int    `json:"poll_interval_seconds"`
 
-	Fonts struct {
-		Header FontConfig `json:"header"`
-		Body   FontConfig `json:"body"`
-	} `json:"fonts"`
+	FontSize float64           `json:"font_size"`
+	Fonts    map[string]string `json:"fonts"`
+	Rules    []Rule            `json:"rules"`
 }
 
-type FontConfig struct {
-	Name string  `json:"name"`
-	File string  `json:"file"`
-	Size float64 `json:"size"`
+type Rule struct {
+	Name      string `json:"name"`
+	Delimiter string `json:"delimiter"`
+	Font      string `json:"font"`
 }
 
-/* ---------------- MAIN ---------------- */
+/* ================= MAIN ================= */
 
 func main() {
 	cfg := loadConfig("config.json")
 
 	if cfg.PollIntervalSeconds <= 0 {
 		cfg.PollIntervalSeconds = 5
+	}
+	if cfg.FontSize <= 0 {
+		cfg.FontSize = 11
 	}
 
 	sshClient := connectSSH(cfg)
@@ -61,7 +63,7 @@ func main() {
 	for range ticker.C {
 		files, err := listRemoteFiles(sshClient, cfg.RemoteDirectory)
 		if err != nil {
-			log.Println("List error:", err)
+			log.Println(err)
 			continue
 		}
 
@@ -81,7 +83,7 @@ func main() {
 	}
 }
 
-/* ---------------- SSH ---------------- */
+/* ================= SSH ================= */
 
 func connectSSH(cfg Config) *ssh.Client {
 	conf := &ssh.ClientConfig{
@@ -96,7 +98,7 @@ func connectSSH(cfg Config) *ssh.Client {
 	addr := fmt.Sprintf("%s:%d", cfg.SSH.Host, cfg.SSH.Port)
 	client, err := ssh.Dial("tcp", addr, conf)
 	if err != nil {
-		log.Fatal("SSH connection failed:", err)
+		log.Fatal(err)
 	}
 	return client
 }
@@ -114,7 +116,7 @@ func listRemoteFiles(client *ssh.Client, dir string) ([]string, error) {
 	return strings.Fields(out.String()), nil
 }
 
-/* ---------------- PROCESSING ---------------- */
+/* ================= PROCESS ================= */
 
 func processFile(cfg Config, client *ssh.Client, filename string) {
 	remotePath := filepath.Join(cfg.RemoteDirectory, filename)
@@ -135,14 +137,11 @@ func processFile(cfg Config, client *ssh.Client, filename string) {
 	}
 
 	if err != nil {
-		log.Println("PDF error:", err)
+		log.Println(err)
 		return
 	}
 
-	err = uploadPDFAndDelete(client, cfg.RemoteDirectory, remotePath, localPDF)
-	if err != nil {
-		log.Println("Upload error:", err)
-	}
+	_ = uploadPDFAndDelete(client, cfg.RemoteDirectory, remotePath, localPDF)
 }
 
 func readRemoteFile(client *ssh.Client, path string) ([]byte, error) {
@@ -164,7 +163,8 @@ func uploadPDFAndDelete(client *ssh.Client, dir, oldFile, localPDF string) error
 	s, _ := client.NewSession()
 	defer s.Close()
 
-	cmd := fmt.Sprintf("cat > %s/%s && rm %s",
+	cmd := fmt.Sprintf(
+		"cat > %s/%s && rm %s",
 		dir,
 		filepath.Base(localPDF),
 		oldFile,
@@ -174,30 +174,91 @@ func uploadPDFAndDelete(client *ssh.Client, dir, oldFile, localPDF string) error
 	return s.Run(cmd)
 }
 
-/* ---------------- PDF CONVERSION ---------------- */
+/* ================= PDF ================= */
 
 func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
-	pdf.AddUTF8Font(cfg.Fonts.Header.Name, "", cfg.Fonts.Header.File)
-	pdf.AddUTF8Font(cfg.Fonts.Body.Name, "", cfg.Fonts.Body.File)
+	for name, path := range cfg.Fonts {
+		pdf.AddUTF8Font(name, "", path)
+	}
 }
+
+/* ===== Rule-driven formatter with escaping ===== */
+
+func writeFormattedLine(
+	pdf *gofpdf.Fpdf,
+	cfg Config,
+	line string,
+	lineHeight float64,
+) {
+	x, y := pdf.GetXY()
+	currentFont := "normal"
+
+	var buf strings.Builder
+
+	flush := func() {
+		if buf.Len() == 0 {
+			return
+		}
+		pdf.SetFont(currentFont, "", cfg.FontSize)
+		pdf.Write(lineHeight, buf.String())
+		buf.Reset()
+	}
+
+	for i := 0; i < len(line); {
+		// Escaped delimiter
+		if line[i] == '\\' {
+			for _, r := range cfg.Rules {
+				d := r.Delimiter
+				if i+1+len(d) <= len(line) && line[i+1:i+1+len(d)] == d {
+					buf.WriteString(d)
+					i += 1 + len(d)
+					goto next
+				}
+			}
+		}
+
+		// Rule match
+		for _, r := range cfg.Rules {
+			d := r.Delimiter
+			if i+len(d) <= len(line) && line[i:i+len(d)] == d {
+				flush()
+				if currentFont == r.Font {
+					currentFont = "normal"
+				} else {
+					currentFont = r.Font
+				}
+				i += len(d)
+				goto next
+			}
+		}
+
+		buf.WriteByte(line[i])
+		i++
+
+	next:
+	}
+
+	flush()
+	pdf.SetXY(x, y+lineHeight)
+}
+
+/* ================= TXT ================= */
 
 func txtToPDF(cfg Config, data []byte, output string) error {
 	pdf := gofpdf.New("P", "mm", "A4", "")
 	loadFonts(pdf, cfg)
-
 	pdf.AddPage()
-	pdf.SetFont(cfg.Fonts.Header.Name, "", cfg.Fonts.Header.Size)
-	pdf.Cell(0, 10, "Text Document")
-	pdf.Ln(12)
 
-	pdf.SetFont(cfg.Fonts.Body.Name, "", cfg.Fonts.Body.Size)
+	lineHeight := 6.0
 
 	for _, line := range strings.Split(string(data), "\n") {
-		pdf.MultiCell(0, 7, line, "", "", false)
+		writeFormattedLine(pdf, cfg, line, lineHeight)
 	}
 
 	return pdf.OutputFileAndClose(output)
 }
+
+/* ================= CSV ================= */
 
 func csvToPDF(cfg Config, data []byte, output string) error {
 	r := csv.NewReader(bytes.NewReader(data))
@@ -208,37 +269,36 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 
 	pdf := gofpdf.New("L", "mm", "A4", "")
 	loadFonts(pdf, cfg)
-
 	pdf.AddPage()
-	pdf.SetFont(cfg.Fonts.Header.Name, "", cfg.Fonts.Header.Size)
-	pdf.Cell(0, 10, "CSV Document")
-	pdf.Ln(12)
 
-	pdf.SetFont(cfg.Fonts.Body.Name, "", cfg.Fonts.Body.Size)
-
+	lineHeight := 6.0
 	colWidth := 270.0 / float64(len(records[0]))
 
 	for _, row := range records {
-		for _, col := range row {
-			pdf.CellFormat(colWidth, 7, col, "1", 0, "", false, 0, "")
+		xStart, y := pdf.GetXY()
+
+		for i, cell := range row {
+			pdf.SetXY(xStart+float64(i)*colWidth, y)
+			writeFormattedLine(pdf, cfg, cell, lineHeight)
 		}
-		pdf.Ln(-1)
+
+		pdf.SetXY(xStart, y+lineHeight)
 	}
 
 	return pdf.OutputFileAndClose(output)
 }
 
-/* ---------------- UTIL ---------------- */
+/* ================= UTIL ================= */
 
 func loadConfig(path string) Config {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatal("Config read failed:", err)
+		log.Fatal(err)
 	}
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Fatal("Config parse failed:", err)
+		log.Fatal(err)
 	}
 	return cfg
 }
