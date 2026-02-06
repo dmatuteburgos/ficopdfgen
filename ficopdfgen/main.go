@@ -26,12 +26,11 @@ type Config struct {
 		Password string `json:"password"`
 	} `json:"ssh"`
 
-	RemoteDirectory     string `json:"remote_directory"`
-	PollIntervalSeconds int    `json:"poll_interval_seconds"`
-
-	FontSize float64           `json:"font_size"`
-	Fonts    map[string]string `json:"fonts"`
-	Rules    []Rule            `json:"rules"`
+	RemoteDirectory     string            `json:"remote_directory"`
+	PollIntervalSeconds int               `json:"poll_interval_seconds"`
+	FontSize            float64           `json:"font_size"`
+	Fonts               map[string]string `json:"fonts"`
+	Rules               []Rule            `json:"rules"`
 }
 
 type Rule struct {
@@ -43,6 +42,7 @@ type Rule struct {
 /* ================= MAIN ================= */
 
 func main() {
+	log.Println("Starting program...")
 	cfg := loadConfig("config.json")
 
 	if cfg.PollIntervalSeconds <= 0 {
@@ -52,25 +52,39 @@ func main() {
 		cfg.FontSize = 11
 	}
 
+	// Check fonts exist
+	for name, path := range cfg.Fonts {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			log.Fatalf("Font %s not found at path: %s", name, path)
+		}
+	}
+
 	sshClient := connectSSH(cfg)
 	defer sshClient.Close()
-
-	log.Println("Connected to remote host")
+	log.Println("Connected to remote host:", cfg.SSH.Host)
 
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
+		log.Println("Polling remote directory:", cfg.RemoteDirectory)
 		files, err := listRemoteFiles(sshClient, cfg.RemoteDirectory)
 		if err != nil {
-			log.Println(err)
+			log.Println("Error listing files:", err)
 			continue
 		}
 
-		var wg sync.WaitGroup
+		if len(files) == 0 {
+			log.Println("No files found.")
+			continue
+		}
 
+		log.Println("Found files:", files)
+
+		var wg sync.WaitGroup
 		for _, f := range files {
-			if strings.HasSuffix(f, ".txt") || strings.HasSuffix(f, ".csv") {
+			ext := strings.ToLower(filepath.Ext(f))
+			if ext == ".txt" || ext == ".csv" {
 				wg.Add(1)
 				go func(file string) {
 					defer wg.Done()
@@ -98,19 +112,23 @@ func connectSSH(cfg Config) *ssh.Client {
 	addr := fmt.Sprintf("%s:%d", cfg.SSH.Host, cfg.SSH.Port)
 	client, err := ssh.Dial("tcp", addr, conf)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("SSH connection failed:", err)
 	}
 	return client
 }
 
 func listRemoteFiles(client *ssh.Client, dir string) ([]string, error) {
-	s, _ := client.NewSession()
+	s, err := client.NewSession()
+	if err != nil {
+		return nil, err
+	}
 	defer s.Close()
 
 	var out bytes.Buffer
 	s.Stdout = &out
 
-	if err := s.Run("ls " + dir); err != nil {
+	cmd := fmt.Sprintf("ls '%s'", dir)
+	if err := s.Run(cmd); err != nil {
 		return nil, err
 	}
 	return strings.Fields(out.String()), nil
@@ -119,57 +137,73 @@ func listRemoteFiles(client *ssh.Client, dir string) ([]string, error) {
 /* ================= PROCESS ================= */
 
 func processFile(cfg Config, client *ssh.Client, filename string) {
+	log.Println("Processing file:", filename)
 	remotePath := filepath.Join(cfg.RemoteDirectory, filename)
 
 	data, err := readRemoteFile(client, remotePath)
 	if err != nil {
-		log.Println(err)
+		log.Println("Failed to read remote file:", err)
 		return
 	}
+	log.Printf("Read %d bytes from %s\n", len(data), remotePath)
 
 	pdfName := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".pdf"
 	localPDF := filepath.Join(os.TempDir(), pdfName)
+	log.Println("Generating PDF at:", localPDF)
 
-	if strings.HasSuffix(filename, ".txt") {
-		err = txtToPDF(cfg, data, localPDF)
+	var pdfErr error
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == ".txt" {
+		pdfErr = txtToPDF(cfg, data, localPDF)
 	} else {
-		err = csvToPDF(cfg, data, localPDF)
+		pdfErr = csvToPDF(cfg, data, localPDF)
 	}
-
-	if err != nil {
-		log.Println(err)
+	if pdfErr != nil {
+		log.Println("Failed to generate PDF:", pdfErr)
 		return
 	}
 
-	_ = uploadPDFAndDelete(client, cfg.RemoteDirectory, remotePath, localPDF)
+	log.Println("Uploading PDF to remote directory:", pdfName)
+	if err := uploadPDF(client, cfg.RemoteDirectory, localPDF); err != nil {
+		log.Println("Failed to upload PDF:", err)
+		return
+	}
+
+	log.Println("PDF uploaded successfully:", pdfName)
 }
 
+/* ================= REMOTE FILE ================= */
+
 func readRemoteFile(client *ssh.Client, path string) ([]byte, error) {
-	s, _ := client.NewSession()
+	s, err := client.NewSession()
+	if err != nil {
+		return nil, err
+	}
 	defer s.Close()
 
 	var out bytes.Buffer
 	s.Stdout = &out
 
-	if err := s.Run("cat " + path); err != nil {
+	cmd := fmt.Sprintf("cat '%s'", path)
+	if err := s.Run(cmd); err != nil {
 		return nil, err
 	}
 	return out.Bytes(), nil
 }
 
-func uploadPDFAndDelete(client *ssh.Client, dir, oldFile, localPDF string) error {
-	data, _ := os.ReadFile(localPDF)
+func uploadPDF(client *ssh.Client, dir, localPDF string) error {
+	data, err := os.ReadFile(localPDF)
+	if err != nil {
+		return err
+	}
 
-	s, _ := client.NewSession()
+	s, err := client.NewSession()
+	if err != nil {
+		return err
+	}
 	defer s.Close()
 
-	cmd := fmt.Sprintf(
-		"cat > %s/%s && rm %s",
-		dir,
-		filepath.Base(localPDF),
-		oldFile,
-	)
-
+	cmd := fmt.Sprintf("cat > '%s/%s'", dir, filepath.Base(localPDF))
 	s.Stdin = bytes.NewReader(data)
 	return s.Run(cmd)
 }
@@ -178,46 +212,55 @@ func uploadPDFAndDelete(client *ssh.Client, dir, oldFile, localPDF string) error
 
 func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	for name, path := range cfg.Fonts {
+		log.Println("Loading font:", name, "from", path)
 		pdf.AddUTF8Font(name, "", path)
 	}
 }
 
 /* ===== Rule-driven formatter with escaping ===== */
 
-func writeFormattedLine(
-	pdf *gofpdf.Fpdf,
-	cfg Config,
-	line string,
-	lineHeight float64,
-) {
+func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight float64) {
 	x, y := pdf.GetXY()
 	currentFont := "normal"
+	if _, ok := cfg.Fonts[currentFont]; !ok {
+		currentFont = ""
+	}
 
 	var buf strings.Builder
-
 	flush := func() {
 		if buf.Len() == 0 {
 			return
 		}
-		pdf.SetFont(currentFont, "", cfg.FontSize)
+		fontToUse := currentFont
+		if _, ok := cfg.Fonts[fontToUse]; !ok {
+			fontToUse = "normal"
+		}
+		pdf.SetFont(fontToUse, "", cfg.FontSize)
 		pdf.Write(lineHeight, buf.String())
 		buf.Reset()
 	}
 
-	for i := 0; i < len(line); {
+	i := 0
+	for i < len(line) {
 		// Escaped delimiter
+		escaped := false
 		if line[i] == '\\' {
 			for _, r := range cfg.Rules {
 				d := r.Delimiter
 				if i+1+len(d) <= len(line) && line[i+1:i+1+len(d)] == d {
 					buf.WriteString(d)
 					i += 1 + len(d)
-					goto next
+					escaped = true
+					break
 				}
 			}
 		}
+		if escaped {
+			continue
+		}
 
 		// Rule match
+		matched := false
 		for _, r := range cfg.Rules {
 			d := r.Delimiter
 			if i+len(d) <= len(line) && line[i:i+len(d)] == d {
@@ -228,16 +271,17 @@ func writeFormattedLine(
 					currentFont = r.Font
 				}
 				i += len(d)
-				goto next
+				matched = true
+				break
 			}
+		}
+		if matched {
+			continue
 		}
 
 		buf.WriteByte(line[i])
 		i++
-
-	next:
 	}
-
 	flush()
 	pdf.SetXY(x, y+lineHeight)
 }
@@ -250,12 +294,16 @@ func txtToPDF(cfg Config, data []byte, output string) error {
 	pdf.AddPage()
 
 	lineHeight := 6.0
-
-	for _, line := range strings.Split(string(data), "\n") {
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
 		writeFormattedLine(pdf, cfg, line, lineHeight)
 	}
 
-	return pdf.OutputFileAndClose(output)
+	err := pdf.OutputFileAndClose(output)
+	if err != nil {
+		log.Println("Error writing PDF:", err)
+	}
+	return err
 }
 
 /* ================= CSV ================= */
@@ -264,7 +312,12 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 	r := csv.NewReader(bytes.NewReader(data))
 	records, err := r.ReadAll()
 	if err != nil {
+		log.Println("CSV read error:", err)
 		return err
+	}
+	if len(records) == 0 {
+		log.Println("CSV file empty, skipping PDF generation")
+		return nil
 	}
 
 	pdf := gofpdf.New("L", "mm", "A4", "")
@@ -272,20 +325,23 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 	pdf.AddPage()
 
 	lineHeight := 6.0
-	colWidth := 270.0 / float64(len(records[0]))
+	colCount := len(records[0])
+	colWidth := 270.0 / float64(colCount)
 
 	for _, row := range records {
 		xStart, y := pdf.GetXY()
-
 		for i, cell := range row {
 			pdf.SetXY(xStart+float64(i)*colWidth, y)
 			writeFormattedLine(pdf, cfg, cell, lineHeight)
 		}
-
 		pdf.SetXY(xStart, y+lineHeight)
 	}
 
-	return pdf.OutputFileAndClose(output)
+	err = pdf.OutputFileAndClose(output)
+	if err != nil {
+		log.Println("Error writing CSV PDF:", err)
+	}
+	return err
 }
 
 /* ================= UTIL ================= */
@@ -293,12 +349,12 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 func loadConfig(path string) Config {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Config read failed:", err)
 	}
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Fatal(err)
+		log.Fatal("Config parse failed:", err)
 	}
 	return cfg
 }
