@@ -175,7 +175,7 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 		return
 	}
 
-	// Count leading spaces for indentation
+	// Preserve leading spaces
 	leadingSpaces := len(line) - len(strings.TrimLeft(line, " "))
 	cursorX += float64(leadingSpaces) * pdf.GetStringWidth(" ")
 
@@ -192,10 +192,16 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 			if strings.HasPrefix(word, r.Delimiter) && strings.HasSuffix(word, r.Delimiter) {
 				font = r.Font
 				word = word[len(r.Delimiter) : len(word)-len(r.Delimiter)]
+				break
 			}
 		}
-		pdf.SetFont(font, "", cfg.FontSize)
 
+		if word == "" {
+			cursorX += pdf.GetStringWidth(" ")
+			continue
+		}
+
+		pdf.SetFont(font, "", cfg.FontSize)
 		spaceWidth := pdf.GetStringWidth(" ")
 
 		for len(word) > 0 {
