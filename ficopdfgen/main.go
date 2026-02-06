@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"text/template"
 	"time"
@@ -25,28 +24,7 @@ func exeDir() string {
 	if err != nil {
 		log.Fatal(err)
 	}
-	return filepath.Dir(exe)
-}
-
-//
-// -------------------- REPORT BASE RESOLVER (FIX) --------------------
-//
-
-func resolveReportBase(report string) (string, error) {
-	// 1️⃣ junto al ejecutable (BINARIO EN WINDOWS)
-	exeBase := filepath.Join(exeDir(), "reports", report)
-	if info, err := os.Stat(exeBase); err == nil && info.IsDir() {
-		return exeBase, nil
-	}
-
-	// 2️⃣ fallback: working directory
-	wd, _ := os.Getwd()
-	wdBase := filepath.Join(wd, "reports", report)
-	if info, err := os.Stat(wdBase); err == nil && info.IsDir() {
-		return wdBase, nil
-	}
-
-	return "", fmt.Errorf("report directory not found: reports/%s", report)
+	return strings.ReplaceAll(exe, "\\", "/")[:strings.LastIndex(strings.ReplaceAll(exe, "\\", "/"), "/")]
 }
 
 //
@@ -158,6 +136,112 @@ func pageSize(style *ReportStyle) (float64, float64) {
 }
 
 //
+// -------------------- WORD WRAP --------------------
+//
+
+func wrap(pdf *gopdf.GoPdf, text, font string, size, maxW float64) []string {
+	pdf.SetFont(font, "", size)
+
+	words := strings.Fields(text)
+	var lines []string
+	line := ""
+
+	for _, w := range words {
+		test := strings.TrimSpace(line + " " + w)
+		width, _ := pdf.MeasureTextWidth(test)
+		if width > maxW && line != "" {
+			lines = append(lines, line)
+			line = w
+		} else {
+			if line == "" {
+				line = w
+			} else {
+				line += " " + w
+			}
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+//
+// -------------------- STYLE TAG PARSER --------------------
+//
+
+type part struct {
+	Text string
+	Font string
+}
+
+func parseStyled(line string, rules map[string]string) []part {
+	font := rules["normal"]
+	var out []part
+	buf := ""
+
+	flush := func() {
+		if buf != "" {
+			out = append(out, part{buf, font})
+			buf = ""
+		}
+	}
+
+	for len(line) > 0 {
+		switch {
+		case strings.HasPrefix(line, "<bold>"):
+			flush()
+			font = rules["bold"]
+			line = line[6:]
+		case strings.HasPrefix(line, "<italic>"):
+			flush()
+			font = rules["italic"]
+			line = line[8:]
+		case strings.HasPrefix(line, "</bold>"), strings.HasPrefix(line, "</italic>"):
+			flush()
+			font = rules["normal"]
+			line = line[strings.Index(line, ">")+1:]
+		default:
+			buf += string(line[0])
+			line = line[1:]
+		}
+	}
+	flush()
+	return out
+}
+
+//
+// -------------------- PDF WRITE --------------------
+//
+
+func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[string]string, pageW, pageH float64) {
+	fontSize := style.PDF.FontSize
+	if fontSize == 0 {
+		fontSize = 12
+	}
+
+	margin := 50.0
+	y := margin
+
+	for _, line := range strings.Split(content, "\n") {
+		parts := parseStyled(line, rules)
+
+		for _, p := range parts {
+			for _, l := range wrap(pdf, p.Text, p.Font, fontSize, pageW-2*margin) {
+				if y > pageH-margin {
+					pdf.AddPage()
+					y = margin
+				}
+				pdf.SetFont(p.Font, "", fontSize)
+				pdf.SetXY(margin, y)
+				pdf.Text(l)
+				y += fontSize * 1.5
+			}
+		}
+	}
+}
+
+//
 // -------------------- PDF GENERATION --------------------
 //
 
@@ -168,7 +252,7 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 	pdf.Start(gopdf.Config{PageSize: gopdf.Rect{W: w, H: h}})
 	pdf.AddPage()
 
-	fontDir := filepath.Join(reportFolder, "fonts")
+	fontDir := reportFolder + "/fonts"
 	files, err := os.ReadDir(fontDir)
 	if err != nil {
 		return err
@@ -184,8 +268,8 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 		if f.IsDir() {
 			continue
 		}
-		name := strings.TrimSuffix(f.Name(), filepath.Ext(f.Name()))
-		path := filepath.Join(fontDir, f.Name())
+		name := strings.TrimSuffix(f.Name(), f.Name()[strings.LastIndex(f.Name(), "."):])
+		path := fontDir + "/" + f.Name()
 		pdf.AddTTFFont(name, path)
 
 		for _, r := range style.Rules {
@@ -195,10 +279,7 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 		}
 	}
 
-	pdf.SetFont(rules["normal"], "", style.PDF.FontSize)
-	pdf.SetXY(50, 50)
-	pdf.Text(text)
-
+	writeText(&pdf, text, style, rules, w, h)
 	return pdf.WritePdf(output)
 }
 
@@ -207,33 +288,35 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 //
 
 func generateHandler(w http.ResponseWriter, r *http.Request) {
-	report := r.URL.Query().Get("reportName")
+	report := strings.TrimSpace(r.URL.Query().Get("reportName"))
 	if report == "" {
 		http.Error(w, "reportName required", 400)
 		return
 	}
 
-	base, err := resolveReportBase(report)
-	if err != nil {
-		http.Error(w, err.Error(), 404)
+	// ✅ Ruta construida con / para Windows
+	base := exeDir() + "/reports/" + report
+
+	info, err := os.Stat(base)
+	if err != nil || !info.IsDir() {
+		http.Error(w, "report directory not found: "+base, 500)
 		return
 	}
 
-	templateFile := filepath.Join(base, "template.txt")
-	styleFile := filepath.Join(base, "style.xml")
-	outDir := filepath.Join(base, "output")
-
+	templateFile := base + "/template.txt"
+	styleFile := base + "/style.xml"
+	outDir := base + "/output"
 	_ = os.MkdirAll(outDir, os.ModePerm)
 
 	tmplBytes, err := os.ReadFile(templateFile)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		http.Error(w, "template.txt not found: "+err.Error(), 500)
 		return
 	}
 
 	style, err := loadStyle(styleFile)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		http.Error(w, "style.xml not found: "+err.Error(), 500)
 		return
 	}
 
@@ -248,10 +331,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	_ = tmpl.Execute(&buf, data)
 
-	out := filepath.Join(
-		outDir,
-		fmt.Sprintf("%s_%s.pdf", report, time.Now().Format("2006-01-02_15-04-05")),
-	)
+	out := outDir + "/" + fmt.Sprintf("%s_%s.pdf", report, time.Now().Format("2006-01-02_15-04-05"))
 
 	if err := generatePDF(buf.String(), base, out, style); err != nil {
 		http.Error(w, err.Error(), 500)
