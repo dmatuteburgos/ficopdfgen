@@ -14,3 +14,34 @@
         </Item>
     </Sales>
 </Report>
+
+<Report>
+    <Title>Reporte de Ventas</Title>
+    <Date>2026-02-06</Date>
+    <Intro>Este es un <bold>reporte</bold> de ventas con <italic>bold</italic> y tablas.<br>Se soportan tildes y ñ.</Intro>
+
+    <Table>
+        <Headers>
+            <Header>Producto</Header>
+            <Header>Cantidad</Header>
+            <Header>Precio</Header>
+        </Headers>
+        <Rows>
+            <Row>
+                <Cell>Manzanas</Cell>
+                <Cell>10</Cell>
+                <Cell>2.5</Cell>
+            </Row>
+            <Row>
+                <Cell>Peras</Cell>
+                <Cell>5</Cell>
+                <Cell>3.0</Cell>
+            </Row>
+            <Row>
+                <Cell>Plátanos</Cell>
+                <Cell>7</Cell>
+                <Cell>1.8</Cell>
+            </Row>
+        </Rows>
+    </Table>
+</Report>

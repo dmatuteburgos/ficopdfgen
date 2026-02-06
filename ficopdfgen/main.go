@@ -22,7 +22,6 @@ func exeDir() string {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Use backslashes for Windows
 	dir := strings.ReplaceAll(exe, "/", "\\")
 	return dir[:strings.LastIndex(dir, "\\")]
 }
@@ -43,7 +42,7 @@ type ReportStyle struct {
 	} `xml:"Rules>Rule"`
 }
 
-// -------------------- XML GENERIC PARSER --------------------
+// -------------------- XML PARSER --------------------
 type xmlNode struct {
 	XMLName xml.Name
 	Content string    `xml:",chardata"`
@@ -52,17 +51,13 @@ type xmlNode struct {
 
 func nodeToMap(n xmlNode) map[string]interface{} {
 	if len(n.Nodes) == 0 {
-		return map[string]interface{}{
-			n.XMLName.Local: strings.TrimSpace(n.Content),
-		}
+		return map[string]interface{}{n.XMLName.Local: strings.TrimSpace(n.Content)}
 	}
-
 	result := make(map[string]interface{})
 	for _, child := range n.Nodes {
 		childMap := nodeToMap(child)
 		key := child.XMLName.Local
 		val := childMap[key]
-
 		if existing, ok := result[key]; ok {
 			switch e := existing.(type) {
 			case []interface{}:
@@ -74,10 +69,7 @@ func nodeToMap(n xmlNode) map[string]interface{} {
 			result[key] = val
 		}
 	}
-
-	return map[string]interface{}{
-		n.XMLName.Local: result,
-	}
+	return map[string]interface{}{n.XMLName.Local: result}
 }
 
 func parseXMLToMap(xmlBytes []byte) (map[string]interface{}, error) {
@@ -85,9 +77,7 @@ func parseXMLToMap(xmlBytes []byte) (map[string]interface{}, error) {
 	if err := xml.Unmarshal(xmlBytes, &root); err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{
-		root.XMLName.Local: nodeToMap(root)[root.XMLName.Local],
-	}, nil
+	return map[string]interface{}{root.XMLName.Local: nodeToMap(root)[root.XMLName.Local]}, nil
 }
 
 // -------------------- LOAD STYLE --------------------
@@ -122,9 +112,9 @@ func pageSize(style *ReportStyle) (float64, float64) {
 // -------------------- WORD WRAP --------------------
 func wrap(pdf *gopdf.GoPdf, text, font string, size, maxW float64) []string {
 	pdf.SetFont(font, "", size)
-	words := strings.Fields(text)
 	var lines []string
 	line := ""
+	words := strings.Fields(text)
 	for _, w := range words {
 		test := strings.TrimSpace(line + " " + w)
 		width, _ := pdf.MeasureTextWidth(test)
@@ -145,7 +135,7 @@ func wrap(pdf *gopdf.GoPdf, text, font string, size, maxW float64) []string {
 	return lines
 }
 
-// -------------------- STYLE TAG PARSER CON UTF-8 Y <br> --------------------
+// -------------------- STYLE TAG PARSER UTF-8 + <br> --------------------
 type part struct {
 	Text    string
 	Font    string
@@ -184,7 +174,7 @@ func parseStyled(line string, rules map[string]string) []part {
 			flush(true)
 			line = line[6:]
 		default:
-			r, size := utf8.DecodeRuneInString(line) // UTF-8 support
+			r, size := utf8.DecodeRuneInString(line)
 			buf += string(r)
 			line = line[size:]
 		}
@@ -194,13 +184,13 @@ func parseStyled(line string, rules map[string]string) []part {
 }
 
 // -------------------- PDF WRITE --------------------
-func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[string]string, pageW, pageH float64) {
+func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[string]string, pageW, pageH float64, startY float64) float64 {
 	fontSize := style.PDF.FontSize
 	if fontSize == 0 {
 		fontSize = 12
 	}
 	margin := 50.0
-	y := margin
+	y := startY
 
 	for _, line := range strings.Split(content, "\n") {
 		parts := parseStyled(line, rules)
@@ -221,10 +211,43 @@ func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[s
 			}
 		}
 	}
+	return y
+}
+
+// -------------------- TABLA --------------------
+func writeTable(pdf *gopdf.GoPdf, headers []string, rows [][]string, x, y, pageW, pageH float64) float64 {
+	colCount := len(headers)
+	if colCount == 0 {
+		return y
+	}
+	cellW := (pageW - 100) / float64(colCount)
+	cellH := 20.0
+
+	// dibujar headers
+	for i, h := range headers {
+		pdf.SetFont("Arial", "", 12)
+		pdf.SetXY(x+float64(i)*cellW, y)
+		pdf.CellWithOption(&gopdf.Rect{W: cellW, H: cellH}, h, gopdf.CellOption{Align: gopdf.Center})
+	}
+	y += cellH
+
+	// dibujar filas
+	for _, row := range rows {
+		for i, cell := range row {
+			pdf.SetXY(x+float64(i)*cellW, y)
+			pdf.CellWithOption(&gopdf.Rect{W: cellW, H: cellH}, fmt.Sprintf("%v", cell), gopdf.CellOption{Align: gopdf.Center})
+		}
+		y += cellH
+		if y > pageH-50 {
+			pdf.AddPage()
+			y = 50
+		}
+	}
+	return y
 }
 
 // -------------------- PDF GENERATION --------------------
-func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
+func generatePDF(text, reportFolder, output string, style *ReportStyle, data map[string]interface{}) error {
 	w, h := pageSize(style)
 	pdf := gopdf.GoPdf{}
 	pdf.Start(gopdf.Config{PageSize: gopdf.Rect{W: w, H: h}})
@@ -236,12 +259,7 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 		return err
 	}
 
-	rules := map[string]string{
-		"normal": "",
-		"bold":   "",
-		"italic": "",
-	}
-
+	rules := map[string]string{"normal": "", "bold": "", "italic": ""}
 	for _, f := range files {
 		if f.IsDir() {
 			continue
@@ -249,7 +267,6 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 		name := strings.TrimSuffix(f.Name(), f.Name()[strings.LastIndex(f.Name(), "."):])
 		path := fontDir + "\\" + f.Name()
 		pdf.AddTTFFont(name, path)
-
 		for _, r := range style.Rules {
 			if r.Font == name {
 				rules[strings.ToLower(r.Tag)] = name
@@ -257,7 +274,32 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 		}
 	}
 
-	writeText(&pdf, text, style, rules, w, h)
+	y := writeText(&pdf, text, style, rules, w, h, 50)
+
+	// Dibujar tabla si existe
+	if tbl, ok := data["Table"].(map[string]interface{}); ok {
+		headers := []string{}
+		rows := [][]string{}
+
+		if hds, ok := tbl["Headers"].([]interface{}); ok {
+			for _, h := range hds {
+				headers = append(headers, fmt.Sprintf("%v", h))
+			}
+		}
+		if rws, ok := tbl["Rows"].([]interface{}); ok {
+			for _, r := range rws {
+				row := []string{}
+				if rSlice, ok := r.([]interface{}); ok {
+					for _, c := range rSlice {
+						row = append(row, fmt.Sprintf("%v", c))
+					}
+				}
+				rows = append(rows, row)
+			}
+		}
+		y = writeTable(&pdf, headers, rows, 50, y, w, h) // ✅ puntero y actualización de y
+	}
+
 	return pdf.WritePdf(output)
 }
 
@@ -306,7 +348,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 
 	out := outDir + "\\" + fmt.Sprintf("%s_%s.pdf", report, time.Now().Format("2006-01-02_15-04-05"))
 
-	if err := generatePDF(buf.String(), base, out, style); err != nil {
+	if err := generatePDF(buf.String(), base, out, style, data); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}

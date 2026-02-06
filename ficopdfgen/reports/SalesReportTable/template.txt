@@ -1,0 +1,17 @@
+<bold>{{.Report.Title}}</bold>
+Fecha: {{.Report.Date}}
+
+{{.Report.Intro}}
+
+{{- if .Report.Table}}
+<table>
+    <tr>
+        {{range .Report.Table.Headers.Header}}<bold>{{.}}</bold>{{end}}
+    </tr>
+    {{range .Report.Table.Rows.Row}}
+    <tr>
+        {{range .Cell}}{{.}}{{end}}
+    </tr>
+    {{end}}
+</table>
+{{- end}}
