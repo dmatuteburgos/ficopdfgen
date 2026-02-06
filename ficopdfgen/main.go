@@ -54,6 +54,7 @@ func main() {
 		cfg.FontSize = 11
 	}
 
+	// Check fonts
 	for name, path := range cfg.Fonts {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			log.Fatalf("Font %s not found at path: %s", name, path)
@@ -160,7 +161,7 @@ func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	}
 }
 
-// Writes a single line, preserving leading spaces for indentation
+// Writes one line with safe escaping and rule-based formatting
 func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	pageWidth, pageHeight := pdf.GetPageSize()
 	marginLeft, marginTop, marginRight, marginBottom := pdf.GetMargins()
@@ -175,7 +176,7 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 		return
 	}
 
-	// Preserve leading spaces
+	// Leading spaces preserved
 	leadingSpaces := len(line) - len(strings.TrimLeft(line, " "))
 	cursorX += float64(leadingSpaces) * pdf.GetStringWidth(" ")
 
@@ -189,7 +190,10 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	for _, word := range words {
 		font := currentFont
 		for _, r := range cfg.Rules {
-			if strings.HasPrefix(word, r.Delimiter) && strings.HasSuffix(word, r.Delimiter) {
+			// ✅ Safe slice check
+			if len(word) >= 2*len(r.Delimiter) &&
+				strings.HasPrefix(word, r.Delimiter) &&
+				strings.HasSuffix(word, r.Delimiter) {
 				font = r.Font
 				word = word[len(r.Delimiter) : len(word)-len(r.Delimiter)]
 				break
