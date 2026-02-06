@@ -54,7 +54,6 @@ func main() {
 		cfg.FontSize = 11
 	}
 
-	// Check fonts exist
 	for name, path := range cfg.Fonts {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			log.Fatalf("Font %s not found at path: %s", name, path)
@@ -161,7 +160,7 @@ func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	}
 }
 
-// Writes one line applying formatting rules
+// Writes a single line, preserving leading spaces for indentation
 func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	pageWidth, pageHeight := pdf.GetPageSize()
 	marginLeft, marginTop, marginRight, marginBottom := pdf.GetMargins()
@@ -171,12 +170,16 @@ func writeFormattedLine(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	xStart, y := pdf.GetXY()
 	cursorX := xStart
 
-	words := strings.Fields(line)
-	if len(words) == 0 {
+	if strings.TrimSpace(line) == "" {
 		pdf.SetXY(xStart, y+lineHeight)
 		return
 	}
 
+	// Count leading spaces for indentation
+	leadingSpaces := len(line) - len(strings.TrimLeft(line, " "))
+	cursorX += float64(leadingSpaces) * pdf.GetStringWidth(" ")
+
+	words := strings.Fields(strings.TrimSpace(line))
 	currentFont := "normal"
 	if _, ok := cfg.Fonts[currentFont]; !ok {
 		currentFont = ""
@@ -254,11 +257,6 @@ func txtToPDF(cfg Config, data []byte, output string) error {
 	for _, para := range paragraphs {
 		lines := strings.Split(para, "\n")
 		for _, line := range lines {
-			if strings.TrimSpace(line) == "" {
-				_, y := pdf.GetXY()
-				pdf.SetXY(10, y+cfg.FontSize*1.2)
-				continue
-			}
 			writeFormattedLine(pdf, cfg, line)
 		}
 		_, y := pdf.GetXY()
