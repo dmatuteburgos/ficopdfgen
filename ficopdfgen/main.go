@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/phpdave11/gofpdf"
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -63,12 +65,19 @@ func main() {
 	defer sshClient.Close()
 	log.Println("Connected to remote host:", cfg.SSH.Host)
 
+	sftpClient, err := sftp.NewClient(sshClient)
+	if err != nil {
+		log.Fatal("Failed to create SFTP client:", err)
+	}
+	defer sftpClient.Close()
+	log.Println("SFTP client ready")
+
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		log.Println("Polling remote directory:", cfg.RemoteDirectory)
-		files, err := listRemoteFiles(sshClient, cfg.RemoteDirectory)
+		files, err := listRemoteFiles(sftpClient, cfg.RemoteDirectory)
 		if err != nil {
 			log.Println("Error listing files:", err)
 			continue
@@ -88,7 +97,7 @@ func main() {
 				wg.Add(1)
 				go func(file string) {
 					defer wg.Done()
-					processFile(cfg, sshClient, file)
+					processFile(cfg, sftpClient, file)
 				}(f)
 			}
 		}
@@ -97,7 +106,7 @@ func main() {
 	}
 }
 
-/* ================= SSH ================= */
+/* ================= SSH / SFTP ================= */
 
 func connectSSH(cfg Config) *ssh.Client {
 	conf := &ssh.ClientConfig{
@@ -106,7 +115,7 @@ func connectSSH(cfg Config) *ssh.Client {
 			ssh.Password(cfg.SSH.Password),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         5 * time.Second,
+		Timeout:         10 * time.Second,
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.SSH.Host, cfg.SSH.Port)
@@ -117,30 +126,27 @@ func connectSSH(cfg Config) *ssh.Client {
 	return client
 }
 
-func listRemoteFiles(client *ssh.Client, dir string) ([]string, error) {
-	s, err := client.NewSession()
+func listRemoteFiles(client *sftp.Client, dir string) ([]string, error) {
+	files := []string{}
+	remoteFiles, err := client.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	defer s.Close()
-
-	var out bytes.Buffer
-	s.Stdout = &out
-
-	cmd := fmt.Sprintf("ls '%s'", dir)
-	if err := s.Run(cmd); err != nil {
-		return nil, err
+	for _, fi := range remoteFiles {
+		if !fi.IsDir() {
+			files = append(files, fi.Name())
+		}
 	}
-	return strings.Fields(out.String()), nil
+	return files, nil
 }
 
 /* ================= PROCESS ================= */
 
-func processFile(cfg Config, client *ssh.Client, filename string) {
+func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	log.Println("Processing file:", filename)
 	remotePath := filepath.Join(cfg.RemoteDirectory, filename)
 
-	data, err := readRemoteFile(client, remotePath)
+	data, err := readRemoteFileSFTP(sftpClient, remotePath)
 	if err != nil {
 		log.Println("Failed to read remote file:", err)
 		return
@@ -164,7 +170,7 @@ func processFile(cfg Config, client *ssh.Client, filename string) {
 	}
 
 	log.Println("Uploading PDF to remote directory:", pdfName)
-	if err := uploadPDF(client, cfg.RemoteDirectory, localPDF); err != nil {
+	if err := uploadPDFSFTP(sftpClient, cfg.RemoteDirectory, localPDF); err != nil {
 		log.Println("Failed to upload PDF:", err)
 		return
 	}
@@ -174,38 +180,35 @@ func processFile(cfg Config, client *ssh.Client, filename string) {
 
 /* ================= REMOTE FILE ================= */
 
-func readRemoteFile(client *ssh.Client, path string) ([]byte, error) {
-	s, err := client.NewSession()
+func readRemoteFileSFTP(client *sftp.Client, path string) ([]byte, error) {
+	f, err := client.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer s.Close()
+	defer f.Close()
 
-	var out bytes.Buffer
-	s.Stdout = &out
-
-	cmd := fmt.Sprintf("cat '%s'", path)
-	if err := s.Run(cmd); err != nil {
+	data, err := io.ReadAll(f)
+	if err != nil {
 		return nil, err
 	}
-	return out.Bytes(), nil
+	return data, nil
 }
 
-func uploadPDF(client *ssh.Client, dir, localPDF string) error {
+func uploadPDFSFTP(client *sftp.Client, dir, localPDF string) error {
 	data, err := os.ReadFile(localPDF)
 	if err != nil {
 		return err
 	}
 
-	s, err := client.NewSession()
+	remotePath := filepath.Join(dir, filepath.Base(localPDF))
+	f, err := client.Create(remotePath)
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer f.Close()
 
-	cmd := fmt.Sprintf("cat > '%s/%s'", dir, filepath.Base(localPDF))
-	s.Stdin = bytes.NewReader(data)
-	return s.Run(cmd)
+	_, err = f.Write(data)
+	return err
 }
 
 /* ================= PDF ================= */
