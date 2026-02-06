@@ -2,22 +2,24 @@
   "ssh": {
     "host": "192.168.1.100",
     "port": 22,
-    "user": "remoteuser",
-    "password": "remotepassword"
+    "user": "username",
+    "password": "password"
   },
-  "remote_directory": "/home/remoteuser/watch",
+  "remote_directory": "/home/user/files",
   "poll_interval_seconds": 5,
-
-  "font_size": 11,
-
+  "font_size": 12,
   "fonts": {
-    "normal":  "fonts/ARIAL.TTF",
-    "bold":    "fonts/ARIALB.TTF",
-    "italic":  "fonts/ARIALI.TTF"
+    "normal": "./fonts/Arial.ttf",
+    "bold": "./fonts/Arial-Bold.ttf",
+    "italic": "./fonts/Arial-Italic.ttf"
   },
-
   "rules": [
-    { "name": "bold",   "delimiter": "***", "font": "bold" },
+    { "name": "bold", "delimiter": "***", "font": "bold" },
     { "name": "italic", "delimiter": "^^^", "font": "italic" }
-  ]
+  ],
+  "pdf": {
+    "orientation": "L",
+    "unit": "mm",
+    "page_size": "A4"
+  }
 }

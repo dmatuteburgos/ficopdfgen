@@ -18,8 +18,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-/* ================= CONFIG ================= */
-
 type Config struct {
 	SSH struct {
 		Host     string `json:"host"`
@@ -33,6 +31,12 @@ type Config struct {
 	FontSize            float64           `json:"font_size"`
 	Fonts               map[string]string `json:"fonts"`
 	Rules               []Rule            `json:"rules"`
+
+	PDF struct {
+		Orientation string `json:"orientation"` // "P" or "L"
+		Unit        string `json:"unit"`        // "mm", "pt", "in"
+		PageSize    string `json:"page_size"`   // "A4", "Letter", etc.
+	} `json:"pdf"`
 }
 
 type Rule struct {
@@ -40,8 +44,6 @@ type Rule struct {
 	Delimiter string `json:"delimiter"`
 	Font      string `json:"font"`
 }
-
-/* ================= MAIN ================= */
 
 func main() {
 	log.Println("Starting program...")
@@ -63,36 +65,30 @@ func main() {
 
 	sshClient := connectSSH(cfg)
 	defer sshClient.Close()
-	log.Println("Connected to remote host:", cfg.SSH.Host)
-
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		log.Fatal("Failed to create SFTP client:", err)
 	}
 	defer sftpClient.Close()
-	log.Println("SFTP client ready")
 
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		log.Println("Polling remote directory:", cfg.RemoteDirectory)
 		files, err := listRemoteFiles(sftpClient, cfg.RemoteDirectory)
 		if err != nil {
 			log.Println("Error listing files:", err)
 			continue
 		}
-
 		if len(files) == 0 {
 			log.Println("No files found.")
 			continue
 		}
 
 		log.Println("Found files:", files)
-
 		var wg sync.WaitGroup
 		for _, f := range files {
-			ext := strings.ToLower(f[len(f)-4:]) // .txt or .csv
+			ext := strings.ToLower(f[len(f)-4:])
 			if ext == ".txt" || ext == ".csv" {
 				wg.Add(1)
 				go func(file string) {
@@ -101,12 +97,9 @@ func main() {
 				}(f)
 			}
 		}
-
 		wg.Wait()
 	}
 }
-
-/* ================= SSH / SFTP ================= */
 
 func connectSSH(cfg Config) *ssh.Client {
 	conf := &ssh.ClientConfig{
@@ -117,7 +110,6 @@ func connectSSH(cfg Config) *ssh.Client {
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         10 * time.Second,
 	}
-
 	addr := fmt.Sprintf("%s:%d", cfg.SSH.Host, cfg.SSH.Port)
 	client, err := ssh.Dial("tcp", addr, conf)
 	if err != nil {
@@ -127,68 +119,57 @@ func connectSSH(cfg Config) *ssh.Client {
 }
 
 func listRemoteFiles(client *sftp.Client, dir string) ([]string, error) {
-	files := []string{}
-	remoteFiles, err := client.ReadDir(dir)
+	var files []string
+	entries, err := client.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	for _, fi := range remoteFiles {
-		if !fi.IsDir() {
-			files = append(files, fi.Name())
+	for _, e := range entries {
+		if !e.IsDir() {
+			files = append(files, e.Name())
 		}
 	}
 	return files, nil
 }
 
-/* ================= PROCESS FILE ================= */
-
 func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
 	log.Println("Processing file:", filename)
-
 	pdfName := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".pdf"
 	remotePDFPath := cfg.RemoteDirectory + "/" + pdfName
 
-	// Skip if PDF already exists
 	if _, err := sftpClient.Stat(remotePDFPath); err == nil {
 		log.Println("PDF already exists, skipping:", pdfName)
 		return
 	}
 
 	remotePath := cfg.RemoteDirectory + "/" + filename
-	log.Println("Full remote path:", remotePath)
-
 	data, err := readRemoteFileSFTP(sftpClient, remotePath)
 	if err != nil {
 		log.Println("Failed to read remote file:", err)
 		return
 	}
-	log.Printf("Read %d bytes from %s\n", len(data), remotePath)
 
 	localPDF := os.TempDir() + "/" + pdfName
-	log.Println("Generating PDF at:", localPDF)
-
-	var pdfErr error
 	ext := strings.ToLower(filepath.Ext(filename))
-	if ext == ".txt" {
-		pdfErr = txtToPDF(cfg, data, localPDF)
-	} else {
-		pdfErr = csvToPDF(cfg, data, localPDF)
-	}
-	if pdfErr != nil {
-		log.Println("Failed to generate PDF:", pdfErr)
-		return
-	}
 
-	log.Println("Uploading PDF to remote directory:", pdfName)
-	if err := uploadPDFSFTP(sftpClient, cfg.RemoteDirectory, localPDF); err != nil {
-		log.Println("Failed to upload PDF:", err)
-		return
-	}
-
-	log.Println("PDF uploaded successfully:", pdfName)
+	go func() { // Each PDF generation in its own goroutine
+		var pdfErr error
+		if ext == ".txt" {
+			pdfErr = txtToPDF(cfg, data, localPDF)
+		} else {
+			pdfErr = csvToPDF(cfg, data, localPDF)
+		}
+		if pdfErr != nil {
+			log.Println("PDF generation failed:", pdfErr)
+			return
+		}
+		if err := uploadPDFSFTP(sftpClient, cfg.RemoteDirectory, localPDF); err != nil {
+			log.Println("Upload failed:", err)
+			return
+		}
+		log.Println("PDF generated and uploaded successfully:", pdfName)
+	}()
 }
-
-/* ================= SFTP FILE OPERATIONS ================= */
 
 func readRemoteFileSFTP(client *sftp.Client, path string) ([]byte, error) {
 	f, err := client.Open(path)
@@ -196,12 +177,7 @@ func readRemoteFileSFTP(client *sftp.Client, path string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
+	return io.ReadAll(f)
 }
 
 func uploadPDFSFTP(client *sftp.Client, dir, localPDF string) error {
@@ -209,28 +185,21 @@ func uploadPDFSFTP(client *sftp.Client, dir, localPDF string) error {
 	if err != nil {
 		return err
 	}
-
 	remotePath := dir + "/" + filepath.Base(localPDF)
 	f, err := client.Create(remotePath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
 	_, err = f.Write(data)
 	return err
 }
 
-/* ================= PDF GENERATION ================= */
-
 func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	for name, path := range cfg.Fonts {
-		log.Println("Loading font:", name, "from", path)
 		pdf.AddUTF8Font(name, "", path)
 	}
 }
-
-/* ===== Inline formatter with escaped delimiters ===== */
 
 func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight float64) {
 	pageWidth, _ := pdf.GetPageSize()
@@ -239,153 +208,87 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string, lineHei
 
 	xStart, y := pdf.GetXY()
 	cursorX := xStart
-
 	currentFont := "normal"
 	if _, ok := cfg.Fonts[currentFont]; !ok {
 		currentFont = ""
 	}
 	pdf.SetFont(currentFont, "", cfg.FontSize)
 
-	i := 0
-	var buf strings.Builder
-	flush := func() {
-		if buf.Len() == 0 {
-			return
+	words := strings.Fields(line)
+	for _, word := range words {
+		font := currentFont
+		for _, r := range cfg.Rules {
+			if strings.HasPrefix(word, r.Delimiter) && strings.HasSuffix(word, r.Delimiter) {
+				font = r.Font
+				word = word[len(r.Delimiter) : len(word)-len(r.Delimiter)]
+			}
 		}
-		fontToUse := currentFont
-		if _, ok := cfg.Fonts[fontToUse]; !ok {
-			fontToUse = "normal"
-		}
-		pdf.SetFont(fontToUse, "", cfg.FontSize)
-		str := buf.String()
-		buf.Reset()
+		pdf.SetFont(font, "", cfg.FontSize)
 
-		// Measure width
-		width := pdf.GetStringWidth(str)
+		width := pdf.GetStringWidth(word + " ")
 		if cursorX+width > maxWidth {
-			// Wrap to next line
 			cursorX = marginLeft
 			y += lineHeight
 			pdf.SetXY(cursorX, y)
 		}
-
 		pdf.SetXY(cursorX, y)
-		pdf.Write(lineHeight, str)
+		pdf.Write(lineHeight, word+" ")
 		cursorX += width
 	}
-
-	for i < len(line) {
-		escaped := false
-		if line[i] == '\\' {
-			for _, r := range cfg.Rules {
-				d := r.Delimiter
-				if i+1+len(d) <= len(line) && line[i+1:i+1+len(d)] == d {
-					buf.WriteString(d)
-					i += 1 + len(d)
-					escaped = true
-					break
-				}
-			}
-		}
-		if escaped {
-			continue
-		}
-
-		matched := false
-		for _, r := range cfg.Rules {
-			d := r.Delimiter
-			if i+len(d) <= len(line) && line[i:i+len(d)] == d {
-				flush()
-				if currentFont == r.Font {
-					currentFont = "normal"
-				} else {
-					currentFont = r.Font
-				}
-				i += len(d)
-				matched = true
-				break
-			}
-		}
-		if matched {
-			continue
-		}
-
-		buf.WriteByte(line[i])
-		i++
-	}
-	flush()
 	pdf.SetXY(marginLeft, y+lineHeight)
 }
 
-/* ================= TXT ================= */
-
 func txtToPDF(cfg Config, data []byte, output string) error {
-	pdf := gofpdf.New("P", "mm", "A4", "")
+	pdf := gofpdf.New(cfg.PDF.Orientation, cfg.PDF.Unit, cfg.PDF.PageSize, "")
 	loadFonts(pdf, cfg)
 	pdf.AddPage()
-
-	lineHeight := 6.0
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
-		writeFormattedLineInline(pdf, cfg, line, lineHeight)
+		writeFormattedLineInline(pdf, cfg, line, 6)
 	}
-
-	err := pdf.OutputFileAndClose(output)
-	if err != nil {
-		log.Println("Error writing PDF:", err)
-	}
-	return err
+	return pdf.OutputFileAndClose(output)
 }
-
-/* ================= CSV ================= */
 
 func csvToPDF(cfg Config, data []byte, output string) error {
 	r := csv.NewReader(bytes.NewReader(data))
 	records, err := r.ReadAll()
-	if err != nil {
-		log.Println("CSV read error:", err)
+	if err != nil || len(records) == 0 {
 		return err
 	}
-	if len(records) == 0 {
-		log.Println("CSV file empty, skipping PDF generation")
-		return nil
-	}
-
-	pdf := gofpdf.New("L", "mm", "A4", "")
+	pdf := gofpdf.New(cfg.PDF.Orientation, cfg.PDF.Unit, cfg.PDF.PageSize, "")
 	loadFonts(pdf, cfg)
 	pdf.AddPage()
 
+	pageWidth, _ := pdf.GetPageSize()
+	marginLeft, _, marginRight, _ := pdf.GetMargins()
+	usableWidth := pageWidth - marginLeft - marginRight
+
 	lineHeight := 6.0
 	colCount := len(records[0])
-	colWidth := 270.0 / float64(colCount)
+	colWidth := usableWidth / float64(colCount)
 
 	for _, row := range records {
 		xStart, y := pdf.GetXY()
-		for i, cell := range row {
-			pdf.SetXY(xStart+float64(i)*colWidth, y)
+		cursorX := xStart
+		for _, cell := range row {
+			pdf.SetXY(cursorX, y)
 			writeFormattedLineInline(pdf, cfg, cell, lineHeight)
+			cursorX += colWidth
 		}
 		pdf.SetXY(xStart, y+lineHeight)
 	}
 
-	err = pdf.OutputFileAndClose(output)
-	if err != nil {
-		log.Println("Error writing CSV PDF:", err)
-	}
-	return err
+	return pdf.OutputFileAndClose(output)
 }
-
-/* ================= UTIL ================= */
 
 func loadConfig(path string) Config {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatal("Config read failed:", err)
+		log.Fatal("Failed to read config:", err)
 	}
-
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Fatal("Config parse failed:", err)
+		log.Fatal("Failed to parse config:", err)
 	}
 	return cfg
 }
