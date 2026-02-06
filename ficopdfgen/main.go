@@ -8,7 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -56,7 +56,6 @@ func main() {
 		cfg.FontSize = 11
 	}
 
-	// Check fonts exist
 	for name, path := range cfg.Fonts {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			log.Fatalf("Font %s not found at path: %s", name, path)
@@ -65,6 +64,7 @@ func main() {
 
 	sshClient := connectSSH(cfg)
 	defer sshClient.Close()
+
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		log.Fatal("Failed to create SFTP client:", err)
@@ -101,12 +101,12 @@ func main() {
 	}
 }
 
+// --- SSH/SFTP helpers ---
+
 func connectSSH(cfg Config) *ssh.Client {
 	conf := &ssh.ClientConfig{
-		User: cfg.SSH.User,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(cfg.SSH.Password),
-		},
+		User:            cfg.SSH.User,
+		Auth:            []ssh.AuthMethod{ssh.Password(cfg.SSH.Password)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         10 * time.Second,
 	}
@@ -125,54 +125,15 @@ func listRemoteFiles(client *sftp.Client, dir string) ([]string, error) {
 		return nil, err
 	}
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
 			files = append(files, e.Name())
 		}
 	}
 	return files, nil
 }
 
-func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
-	log.Println("Processing file:", filename)
-	pdfName := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".pdf"
-	remotePDFPath := cfg.RemoteDirectory + "/" + pdfName
-
-	if _, err := sftpClient.Stat(remotePDFPath); err == nil {
-		log.Println("PDF already exists, skipping:", pdfName)
-		return
-	}
-
-	remotePath := cfg.RemoteDirectory + "/" + filename
-	data, err := readRemoteFileSFTP(sftpClient, remotePath)
-	if err != nil {
-		log.Println("Failed to read remote file:", err)
-		return
-	}
-
-	localPDF := os.TempDir() + "/" + pdfName
-	ext := strings.ToLower(filepath.Ext(filename))
-
-	go func() { // Each PDF generation in its own goroutine
-		var pdfErr error
-		if ext == ".txt" {
-			pdfErr = txtToPDF(cfg, data, localPDF)
-		} else {
-			pdfErr = csvToPDF(cfg, data, localPDF)
-		}
-		if pdfErr != nil {
-			log.Println("PDF generation failed:", pdfErr)
-			return
-		}
-		if err := uploadPDFSFTP(sftpClient, cfg.RemoteDirectory, localPDF); err != nil {
-			log.Println("Upload failed:", err)
-			return
-		}
-		log.Println("PDF generated and uploaded successfully:", pdfName)
-	}()
-}
-
-func readRemoteFileSFTP(client *sftp.Client, path string) ([]byte, error) {
-	f, err := client.Open(path)
+func readRemoteFileSFTP(client *sftp.Client, remotePath string) ([]byte, error) {
+	f, err := client.Open(remotePath)
 	if err != nil {
 		return nil, err
 	}
@@ -180,12 +141,12 @@ func readRemoteFileSFTP(client *sftp.Client, path string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-func uploadPDFSFTP(client *sftp.Client, dir, localPDF string) error {
+func uploadPDFSFTP(client *sftp.Client, remoteDir, localPDF string) error {
 	data, err := os.ReadFile(localPDF)
 	if err != nil {
 		return err
 	}
-	remotePath := dir + "/" + filepath.Base(localPDF)
+	remotePath := path.Join(remoteDir, path.Base(localPDF))
 	f, err := client.Create(remotePath)
 	if err != nil {
 		return err
@@ -195,12 +156,15 @@ func uploadPDFSFTP(client *sftp.Client, dir, localPDF string) error {
 	return err
 }
 
+// --- PDF generation ---
+
 func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	for name, path := range cfg.Fonts {
 		pdf.AddUTF8Font(name, "", path)
 	}
 }
 
+// Improved line writer: handles long words and wraps properly
 func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string, lineHeight float64) {
 	pageWidth, _ := pdf.GetPageSize()
 	marginLeft, _, marginRight, _ := pdf.GetMargins()
@@ -217,6 +181,7 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string, lineHei
 	words := strings.Fields(line)
 	for _, word := range words {
 		font := currentFont
+
 		for _, r := range cfg.Rules {
 			if strings.HasPrefix(word, r.Delimiter) && strings.HasSuffix(word, r.Delimiter) {
 				font = r.Font
@@ -225,16 +190,44 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string, lineHei
 		}
 		pdf.SetFont(font, "", cfg.FontSize)
 
-		width := pdf.GetStringWidth(word + " ")
-		if cursorX+width > maxWidth {
+		for len(word) > 0 {
+			remainingWidth := maxWidth - cursorX
+			fit := 0
+			for i := 1; i <= len(word); i++ {
+				if pdf.GetStringWidth(word[:i]) > remainingWidth {
+					break
+				}
+				fit = i
+			}
+			if fit == 0 {
+				cursorX = marginLeft
+				y += lineHeight
+				pdf.SetXY(cursorX, y)
+				fit = 1
+			}
+
+			pdf.SetXY(cursorX, y)
+			pdf.Write(lineHeight, word[:fit])
+			cursorX += pdf.GetStringWidth(word[:fit])
+			word = word[fit:]
+			if len(word) > 0 {
+				cursorX = marginLeft
+				y += lineHeight
+				pdf.SetXY(cursorX, y)
+			}
+		}
+
+		// Add space
+		spaceWidth := pdf.GetStringWidth(" ")
+		if cursorX+spaceWidth > maxWidth {
 			cursorX = marginLeft
 			y += lineHeight
-			pdf.SetXY(cursorX, y)
+		} else {
+			cursorX += spaceWidth
 		}
 		pdf.SetXY(cursorX, y)
-		pdf.Write(lineHeight, word+" ")
-		cursorX += width
 	}
+
 	pdf.SetXY(marginLeft, y+lineHeight)
 }
 
@@ -242,10 +235,12 @@ func txtToPDF(cfg Config, data []byte, output string) error {
 	pdf := gofpdf.New(cfg.PDF.Orientation, cfg.PDF.Unit, cfg.PDF.PageSize, "")
 	loadFonts(pdf, cfg)
 	pdf.AddPage()
+
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		writeFormattedLineInline(pdf, cfg, line, 6)
 	}
+
 	return pdf.OutputFileAndClose(output)
 }
 
@@ -280,6 +275,49 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 
 	return pdf.OutputFileAndClose(output)
 }
+
+// --- File processing ---
+
+func processFile(cfg Config, sftpClient *sftp.Client, filename string) {
+	log.Println("Processing file:", filename)
+	pdfName := strings.TrimSuffix(filename, path.Ext(filename)) + ".pdf"
+	remotePDFPath := path.Join(cfg.RemoteDirectory, pdfName)
+
+	if _, err := sftpClient.Stat(remotePDFPath); err == nil {
+		log.Println("PDF already exists, skipping:", pdfName)
+		return
+	}
+
+	remotePath := path.Join(cfg.RemoteDirectory, filename)
+	data, err := readRemoteFileSFTP(sftpClient, remotePath)
+	if err != nil {
+		log.Println("Failed to read remote file:", err)
+		return
+	}
+
+	localPDF := os.TempDir() + "/" + pdfName
+	ext := strings.ToLower(path.Ext(filename))
+
+	go func() {
+		var pdfErr error
+		if ext == ".txt" {
+			pdfErr = txtToPDF(cfg, data, localPDF)
+		} else {
+			pdfErr = csvToPDF(cfg, data, localPDF)
+		}
+		if pdfErr != nil {
+			log.Println("PDF generation failed:", pdfErr)
+			return
+		}
+		if err := uploadPDFSFTP(sftpClient, cfg.RemoteDirectory, localPDF); err != nil {
+			log.Println("Upload failed:", err)
+			return
+		}
+		log.Println("PDF generated and uploaded successfully:", pdfName)
+	}()
+}
+
+// --- Config loader ---
 
 func loadConfig(path string) Config {
 	data, err := os.ReadFile(path)
