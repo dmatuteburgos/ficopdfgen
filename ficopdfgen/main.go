@@ -164,7 +164,7 @@ func loadFonts(pdf *gofpdf.Fpdf, cfg Config) {
 	}
 }
 
-// Corrected line writer: no extra empty lines, wraps properly
+// Writes a single line with formatting rules
 func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	pageWidth, pageHeight := pdf.GetPageSize()
 	marginLeft, marginTop, marginRight, marginBottom := pdf.GetMargins()
@@ -190,7 +190,6 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
 			}
 		}
 		pdf.SetFont(font, "", cfg.FontSize)
-
 		spaceWidth := pdf.GetStringWidth(" ")
 
 		for len(word) > 0 {
@@ -243,17 +242,25 @@ func writeFormattedLineInline(pdf *gofpdf.Fpdf, cfg Config, line string) {
 	pdf.SetXY(marginLeft, y+lineHeight)
 }
 
+// --- TXT to PDF (preserving paragraph spacing) ---
 func txtToPDF(cfg Config, data []byte, output string) error {
 	pdf := gofpdf.New(cfg.PDF.Orientation, cfg.PDF.Unit, cfg.PDF.PageSize, "")
 	loadFonts(pdf, cfg)
 	pdf.AddPage()
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		writeFormattedLineInline(pdf, cfg, line)
+	paragraphs := strings.Split(string(data), "\n\n") // preserve paragraph breaks
+	for _, para := range paragraphs {
+		lines := strings.Split(para, "\n")
+		for _, line := range lines {
+			writeFormattedLineInline(pdf, cfg, line)
+		}
+		// Add extra line between paragraphs
+		_, y := pdf.GetXY()
+		pdf.SetXY(10, y+cfg.FontSize*1.2)
 	}
 	return pdf.OutputFileAndClose(output)
 }
 
+// --- CSV with vertical auto-wrap ---
 func csvToPDF(cfg Config, data []byte, output string) error {
 	r := csv.NewReader(bytes.NewReader(data))
 	records, err := r.ReadAll()
@@ -265,37 +272,15 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 	loadFonts(pdf, cfg)
 	pdf.AddPage()
 
-	pageWidth, _ := pdf.GetPageSize()
-	marginLeft, _, marginRight, _ := pdf.GetMargins()
+	pageWidth, pageHeight := pdf.GetPageSize()
+	marginLeft, marginTop, marginRight, marginBottom := pdf.GetMargins()
 	usableWidth := pageWidth - marginLeft - marginRight
 	lineHeight := cfg.FontSize * 1.2
 
 	colCount := len(records[0])
-
-	// Compute dynamic column widths safely
 	colWidths := make([]float64, colCount)
 	for i := 0; i < colCount; i++ {
-		maxW := 0.0
-		for _, row := range records {
-			if i < len(row) {
-				w := pdf.GetStringWidth(row[i])
-				if w > maxW {
-					maxW = w
-				}
-			}
-		}
-		colWidths[i] = maxW + 4
-	}
-
-	totalWidth := 0.0
-	for _, w := range colWidths {
-		totalWidth += w
-	}
-	if totalWidth > usableWidth {
-		scale := usableWidth / totalWidth
-		for i := range colWidths {
-			colWidths[i] *= scale
-		}
+		colWidths[i] = usableWidth / float64(colCount)
 	}
 
 	for _, row := range records {
@@ -303,20 +288,52 @@ func csvToPDF(cfg Config, data []byte, output string) error {
 			continue
 		}
 		xStart, y := pdf.GetXY()
-		cursorX := xStart
+
+		// Compute row height for wrapping
+		rowHeight := lineHeight
 		for i := 0; i < colCount; i++ {
-			pdf.SetXY(cursorX, y)
-			cell := ""
+			var cell string
 			if i < len(row) {
 				cell = row[i]
 			}
-			writeFormattedLineInline(pdf, cfg, cell)
+			lines := pdf.SplitLines([]byte(cell), colWidths[i]-2)
+			if float64(len(lines))*lineHeight > rowHeight {
+				rowHeight = float64(len(lines)) * lineHeight
+			}
+		}
+
+		// Write each cell
+		cursorX := xStart
+		for i := 0; i < colCount; i++ {
+			var cell string
+			if i < len(row) {
+				cell = row[i]
+			}
+			pdf.SetXY(cursorX, y)
+			writeMultilineCell(pdf, cfg, colWidths[i], rowHeight, lineHeight, cell)
 			cursorX += colWidths[i]
 		}
-		pdf.SetXY(xStart, y+lineHeight)
+
+		// Move to next row
+		y += rowHeight
+		if y+rowHeight > pageHeight-marginBottom {
+			pdf.AddPage()
+			y = marginTop
+		}
+		pdf.SetXY(xStart, y)
 	}
 
 	return pdf.OutputFileAndClose(output)
+}
+
+func writeMultilineCell(pdf *gofpdf.Fpdf, cfg Config, w, h, lineHeight float64, text string) {
+	lines := pdf.SplitLines([]byte(text), w-2)
+	x, y := pdf.GetXY()
+	for _, line := range lines {
+		writeFormattedLineInline(pdf, cfg, string(line))
+		y += lineHeight
+		pdf.SetXY(x, y)
+	}
 }
 
 // --- File processing ---
