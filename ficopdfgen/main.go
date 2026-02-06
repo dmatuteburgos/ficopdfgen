@@ -11,14 +11,12 @@ import (
 	"strings"
 	"text/template"
 	"time"
+	"unicode/utf8"
 
 	"github.com/signintech/gopdf"
 )
 
-//
 // -------------------- EXE DIR (WINDOWS FIX) --------------------
-//
-
 func exeDir() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -29,10 +27,7 @@ func exeDir() string {
 	return dir[:strings.LastIndex(dir, "\\")]
 }
 
-//
 // -------------------- STYLE XML --------------------
-//
-
 type ReportStyle struct {
 	XMLName xml.Name `xml:"ReportStyle"`
 	PDF     struct {
@@ -48,10 +43,7 @@ type ReportStyle struct {
 	} `xml:"Rules>Rule"`
 }
 
-//
 // -------------------- XML GENERIC PARSER --------------------
-//
-
 type xmlNode struct {
 	XMLName xml.Name
 	Content string    `xml:",chardata"`
@@ -98,10 +90,7 @@ func parseXMLToMap(xmlBytes []byte) (map[string]interface{}, error) {
 	}, nil
 }
 
-//
 // -------------------- LOAD STYLE --------------------
-//
-
 func loadStyle(path string) (*ReportStyle, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -111,10 +100,7 @@ func loadStyle(path string) (*ReportStyle, error) {
 	return &s, xml.Unmarshal(b, &s)
 }
 
-//
 // -------------------- PAGE SIZE --------------------
-//
-
 func pageSize(style *ReportStyle) (float64, float64) {
 	const mmToPt = 2.83465
 	var w, h float64
@@ -133,10 +119,7 @@ func pageSize(style *ReportStyle) (float64, float64) {
 	return w, h
 }
 
-//
 // -------------------- WORD WRAP --------------------
-//
-
 func wrap(pdf *gopdf.GoPdf, text, font string, size, maxW float64) []string {
 	pdf.SetFont(font, "", size)
 	words := strings.Fields(text)
@@ -162,52 +145,55 @@ func wrap(pdf *gopdf.GoPdf, text, font string, size, maxW float64) []string {
 	return lines
 }
 
-//
-// -------------------- STYLE TAG PARSER --------------------
-//
-
+// -------------------- STYLE TAG PARSER CON UTF-8 Y <br> --------------------
 type part struct {
-	Text string
-	Font string
+	Text    string
+	Font    string
+	NewLine bool
 }
 
 func parseStyled(line string, rules map[string]string) []part {
 	font := rules["normal"]
 	var out []part
 	buf := ""
-	flush := func() {
-		if buf != "" {
-			out = append(out, part{buf, font})
+	flush := func(newLine bool) {
+		if buf != "" || newLine {
+			out = append(out, part{Text: buf, Font: font, NewLine: newLine})
 			buf = ""
 		}
 	}
+
 	for len(line) > 0 {
 		switch {
 		case strings.HasPrefix(line, "<bold>"):
-			flush()
+			flush(false)
 			font = rules["bold"]
 			line = line[6:]
 		case strings.HasPrefix(line, "<italic>"):
-			flush()
+			flush(false)
 			font = rules["italic"]
 			line = line[8:]
 		case strings.HasPrefix(line, "</bold>"), strings.HasPrefix(line, "</italic>"):
-			flush()
+			flush(false)
 			font = rules["normal"]
 			line = line[strings.Index(line, ">")+1:]
+		case strings.HasPrefix(line, "<br>"):
+			flush(true)
+			line = line[4:]
+		case strings.HasPrefix(line, "<br />"):
+			flush(true)
+			line = line[6:]
 		default:
-			buf += string(line[0])
-			line = line[1:]
+			r, size := utf8.DecodeRuneInString(line) // UTF-8 support
+			buf += string(r)
+			line = line[size:]
 		}
 	}
-	flush()
+	flush(false)
 	return out
 }
 
-//
 // -------------------- PDF WRITE --------------------
-//
-
 func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[string]string, pageW, pageH float64) {
 	fontSize := style.PDF.FontSize
 	if fontSize == 0 {
@@ -215,9 +201,14 @@ func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[s
 	}
 	margin := 50.0
 	y := margin
+
 	for _, line := range strings.Split(content, "\n") {
 		parts := parseStyled(line, rules)
 		for _, p := range parts {
+			if p.NewLine {
+				y += fontSize * 1.5
+				continue
+			}
 			for _, l := range wrap(pdf, p.Text, p.Font, fontSize, pageW-2*margin) {
 				if y > pageH-margin {
 					pdf.AddPage()
@@ -232,10 +223,7 @@ func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[s
 	}
 }
 
-//
 // -------------------- PDF GENERATION --------------------
-//
-
 func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 	w, h := pageSize(style)
 	pdf := gopdf.GoPdf{}
@@ -273,10 +261,7 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 	return pdf.WritePdf(output)
 }
 
-//
 // -------------------- HTTP HANDLER --------------------
-//
-
 func generateHandler(w http.ResponseWriter, r *http.Request) {
 	report := strings.TrimSpace(r.URL.Query().Get("reportName"))
 	if report == "" {
@@ -284,9 +269,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 🔹 Use backslashes for Windows paths
 	base := exeDir() + "\\reports\\" + report
-
 	info, err := os.Stat(base)
 	if err != nil || !info.IsDir() {
 		http.Error(w, "report directory not found: "+base, 500)
@@ -331,10 +314,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("PDF created: " + out))
 }
 
-//
 // -------------------- MAIN --------------------
-//
-
 func main() {
 	http.HandleFunc("/generate", generateHandler)
 	fmt.Println("Report generator running on :8080")
