@@ -29,6 +29,27 @@ func exeDir() string {
 }
 
 //
+// -------------------- REPORT BASE RESOLVER (FIX) --------------------
+//
+
+func resolveReportBase(report string) (string, error) {
+	// 1️⃣ junto al ejecutable (BINARIO EN WINDOWS)
+	exeBase := filepath.Join(exeDir(), "reports", report)
+	if info, err := os.Stat(exeBase); err == nil && info.IsDir() {
+		return exeBase, nil
+	}
+
+	// 2️⃣ fallback: working directory
+	wd, _ := os.Getwd()
+	wdBase := filepath.Join(wd, "reports", report)
+	if info, err := os.Stat(wdBase); err == nil && info.IsDir() {
+		return wdBase, nil
+	}
+
+	return "", fmt.Errorf("report directory not found: reports/%s", report)
+}
+
+//
 // -------------------- STYLE XML --------------------
 //
 
@@ -137,112 +158,6 @@ func pageSize(style *ReportStyle) (float64, float64) {
 }
 
 //
-// -------------------- WORD WRAP --------------------
-//
-
-func wrap(pdf *gopdf.GoPdf, text, font string, size, maxW float64) []string {
-	pdf.SetFont(font, "", size)
-
-	words := strings.Fields(text)
-	var lines []string
-	line := ""
-
-	for _, w := range words {
-		test := strings.TrimSpace(line + " " + w)
-		width, _ := pdf.MeasureTextWidth(test)
-		if width > maxW && line != "" {
-			lines = append(lines, line)
-			line = w
-		} else {
-			if line == "" {
-				line = w
-			} else {
-				line += " " + w
-			}
-		}
-	}
-	if line != "" {
-		lines = append(lines, line)
-	}
-	return lines
-}
-
-//
-// -------------------- STYLE TAG PARSER --------------------
-//
-
-type part struct {
-	Text string
-	Font string
-}
-
-func parseStyled(line string, rules map[string]string) []part {
-	font := rules["normal"]
-	var out []part
-	buf := ""
-
-	flush := func() {
-		if buf != "" {
-			out = append(out, part{buf, font})
-			buf = ""
-		}
-	}
-
-	for len(line) > 0 {
-		switch {
-		case strings.HasPrefix(line, "<bold>"):
-			flush()
-			font = rules["bold"]
-			line = line[6:]
-		case strings.HasPrefix(line, "<italic>"):
-			flush()
-			font = rules["italic"]
-			line = line[8:]
-		case strings.HasPrefix(line, "</bold>"), strings.HasPrefix(line, "</italic>"):
-			flush()
-			font = rules["normal"]
-			line = line[strings.Index(line, ">")+1:]
-		default:
-			buf += string(line[0])
-			line = line[1:]
-		}
-	}
-	flush()
-	return out
-}
-
-//
-// -------------------- PDF WRITE --------------------
-//
-
-func writeText(pdf *gopdf.GoPdf, content string, style *ReportStyle, rules map[string]string, pageW, pageH float64) {
-	fontSize := style.PDF.FontSize
-	if fontSize == 0 {
-		fontSize = 12
-	}
-
-	margin := 50.0
-	y := margin
-
-	for _, line := range strings.Split(content, "\n") {
-		parts := parseStyled(line, rules)
-
-		for _, p := range parts {
-			for _, l := range wrap(pdf, p.Text, p.Font, fontSize, pageW-2*margin) {
-				if y > pageH-margin {
-					pdf.AddPage()
-					y = margin
-				}
-				pdf.SetFont(p.Font, "", fontSize)
-				pdf.SetXY(margin, y)
-				pdf.Text(l)
-				y += fontSize * 1.5
-			}
-		}
-	}
-}
-
-//
 // -------------------- PDF GENERATION --------------------
 //
 
@@ -280,7 +195,10 @@ func generatePDF(text, reportFolder, output string, style *ReportStyle) error {
 		}
 	}
 
-	writeText(&pdf, text, style, rules, w, h)
+	pdf.SetFont(rules["normal"], "", style.PDF.FontSize)
+	pdf.SetXY(50, 50)
+	pdf.Text(text)
+
 	return pdf.WritePdf(output)
 }
 
@@ -295,8 +213,11 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ WINDOWS-SAFE PATH
-	base := filepath.Join(exeDir(), "reports", report)
+	base, err := resolveReportBase(report)
+	if err != nil {
+		http.Error(w, err.Error(), 404)
+		return
+	}
 
 	templateFile := filepath.Join(base, "template.txt")
 	styleFile := filepath.Join(base, "style.xml")
